@@ -1,0 +1,11 @@
+# 必需
+requests>=2.31.0
+
+# 浏览器引擎（默认，抗风控最稳）
+playwright>=1.44.0
+
+# 原生 WSS 引擎（可选，更轻量）
+websocket-client>=1.7.0
+
+# 图形界面（python gui.py）
+PySide6>=6.6.0

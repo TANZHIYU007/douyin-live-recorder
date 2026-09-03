@@ -1,0 +1,6 @@
+# 仓库里一律存 LF，检出时各平台按各自习惯来 —— 不依赖每个人的 core.autocrlf 配置
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.icns binary

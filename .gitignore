@@ -1,0 +1,27 @@
+# 打包产物
+build/
+dist/
+# PyInstaller 生成的 spec，里面是打包机器的绝对路径
+*.spec
+
+# 录制输出
+output/
+*.mp4
+*.flv
+*.ts
+*.mkv
+*.jsonl
+*.ass
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
