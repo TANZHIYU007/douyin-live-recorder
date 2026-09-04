@@ -36,6 +36,7 @@ class Status:
     counts: Dict[str, int] = field(default_factory=dict)
     files: List[Tuple[str, int]] = field(default_factory=list)
     post: str = ""                          # 录完之后的收尾进度（封装字幕等）
+    danmaku_note: str = ""                  # 弹幕这一路的异常（被风控挡住等）
 
     @property
     def total_bytes(self) -> int:
@@ -103,6 +104,7 @@ class Recorder:
         self._prefix: Optional[Path] = None
         self._recording = False
         self._post = ""
+        self._engine = None             # 弹幕引擎，界面要读它的连接状态
         self._runs: List[Tuple[video.VideoRecorder, float]] = []
 
     # -- 对外 -------------------------------------------------------------
@@ -131,7 +133,29 @@ class Recorder:
             except OSError:
                 pass
         return Status(running=recording, waiting=not recording and not self.stopping,
-                      info=info, elapsed=elapsed, counts=counts, files=files, post=post)
+                      info=info, elapsed=elapsed, counts=counts, files=files, post=post,
+                      danmaku_note=self._danmaku_note(recording))
+
+    def _danmaku_note(self, recording: bool) -> str:
+        """弹幕这一路有没有出问题。没问题返回空串。
+
+        画面和弹幕是两路独立的管道，弹幕断了画面照录 —— 所以它不能算「错误
+        状态」，但必须让用户当场看见，否则就是录完一整场才发现 jsonl 是空的。
+        """
+        engine = self._engine
+        if engine is None or not recording:
+            return ""
+        if getattr(engine, "blocked", ""):
+            return ("被抖音风控挡在验证页，收不到弹幕。画面不受影响，仍在正常录制。"
+                    "到「设置 → 显示浏览器窗口」，在弹出的窗口里自己过一次验证即可。")
+        connected = getattr(engine, "connected", None)
+        if connected is not None and not connected.is_set():
+            waited = time.time() - getattr(engine, "attached_at", self._start_time)
+            if waited > 45:
+                # 说不准是什么原因，就别乱开药方 —— 只讲事实，让用户去看日志
+                return ("弹幕连接一直没建立，本场可能一条弹幕都收不到。"
+                        "画面不受影响，仍在正常录制；具体原因见「运行日志」。")
+        return ""
 
     def run(self) -> int:
         log.info("目标直播间：%s", self.web_rid)
@@ -180,6 +204,7 @@ class Recorder:
             self._recording, self._prefix, self._live_info = True, prefix, info
 
         engine = self._start_danmaku(info, prefix) if self.opts.record_danmaku else None
+        self._engine = engine           # 界面要从它身上读弹幕连没连上
         try:
             if self.opts.record_video:
                 self._video_loop(info, prefix)

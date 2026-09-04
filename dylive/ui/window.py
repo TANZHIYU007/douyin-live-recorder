@@ -305,6 +305,15 @@ class MainWindow(QMainWindow):
                                   self.tile_chat, self.tile_gift)):
             grid.addWidget(tile, 0, i)
         head_card.body.addLayout(grid)
+
+        # 弹幕这一路出问题时的横幅。画面和弹幕是两路独立管道，弹幕断了画面
+        # 照录 —— 所以不能把整个房间标成「出错」，但必须当场看得见，否则就是
+        # 录完一整场才发现 jsonl 是空的。
+        self.warn_bar = QLabel()
+        self.warn_bar.setObjectName("warnBar")
+        self.warn_bar.setWordWrap(True)
+        self.warn_bar.hide()
+        head_card.body.addWidget(self.warn_bar)
         lay.addWidget(head_card)
 
         # 画面自己会在内部按比例居中，所以直接扔进 splitter 让它铺满就行。
@@ -845,6 +854,7 @@ class MainWindow(QMainWindow):
             self.tile_size.set_value("0 MB")
             self.tile_chat.set_value("0")
             self.tile_gift.set_value("0")
+            self.warn_bar.hide()
             self._refresh_files([])
             return
         st = entry.status()
@@ -864,6 +874,14 @@ class MainWindow(QMainWindow):
                                      + st.counts.get("emoji", 0)))
         self.tile_gift.set_value(str(st.counts.get("gift", 0)
                                      + st.counts.get("social", 0)))
+
+        # 措辞由 recorder 给全 —— 「连不上」和「被验证码挡了」该说的话不一样，
+        # 界面这边统一套一句「过验证即可」会在前一种情况下乱开药方
+        if st.danmaku_note:
+            self.warn_bar.setText("⚠  " + st.danmaku_note)
+            self.warn_bar.show()
+        else:
+            self.warn_bar.hide()
 
     def _apply_view_filter(self) -> None:
         self.filter.set_kinds(VIEW_FILTERS[self.view_filter.currentIndex()])

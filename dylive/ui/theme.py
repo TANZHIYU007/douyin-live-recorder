@@ -289,6 +289,15 @@ QPushButton#iconBtn:hover { background: %(surface2)s; }
     border-radius: 9px; padding: 2px 10px;
     font-size: 11px; font-weight: 700;
 }
+/* 弹幕这一路出问题时的横幅。用琥珀色而不是红色：画面还在正常录，
+   这是「有一半没成」而不是「整个挂了」。 */
+#warnBar {
+    background: rgba(180, 112, 11, 0.10);
+    color: %(amber)s;
+    border: 1px solid rgba(180, 112, 11, 0.30);
+    border-radius: 8px; padding: 8px 12px;
+    font-size: 12px; font-weight: 600;
+}
 
 /* ---------- 房间列表 ---------- */
 QListWidget {

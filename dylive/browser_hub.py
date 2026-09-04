@@ -35,6 +35,11 @@ STREAM_HINTS = (".flv", ".m3u8")
 
 WS_CONNECT_TIMEOUT = 45.0
 
+# 被风控挡住时，抖音返回的是一个「验证码中间页」，直播间的 JS 压根不加载，
+# 于是一个 WebSocket 都不会建 —— 表现就是画面正常录、弹幕一条都没有，而且
+# goto 是成功返回的，不检查的话整场都不会有任何提示。
+VERIFY_HINTS = ("验证码", "verify", "captcha")
+
 # 页面打开失败（网络抖动、房间刚下播）时的重试策略。不重试的话该房间整场
 # 都不会有弹幕，而画面还在录，很容易到事后才发现。
 PAGE_RETRY_LIMIT = 3
@@ -51,8 +56,11 @@ class RoomChannel:
         self.on_event = on_event
         self.on_room_info = on_room_info
         self.start_time = time.time()
+        self.attached_at = time.time()  # 用来判断「等了多久还没连上」
         self.frames = 0
         self.connected = threading.Event()
+        self.blocked = ""               # 非空表示被风控挡在验证页
+        self.warned = False             # 「一直没连上」只喊一次
         self.page = None
         self._hub: Optional["BrowserHub"] = None
 
@@ -233,6 +241,7 @@ class BrowserHub:
             while not self._stop.is_set():
                 self._apply_commands(context, pages)
                 self._apply_retries(context, pages)
+                self._check_silent()
                 keeper.wait_for_timeout(200)     # 必须用它来泵事件
         finally:
             for page in pages.values():
@@ -271,6 +280,26 @@ class BrowserHub:
         self._pending[rid] = time.time() + PAGE_RETRY_DELAY
         log.info("[%s] %.0f 秒后重开页面（第 %d 次）", rid, PAGE_RETRY_DELAY, count)
 
+    def _check_silent(self) -> None:
+        """页面开着、却迟迟没挂上弹幕 WebSocket 的房间，喊一嗓子。
+
+        比只认「验证码」三个字更耐用：不管抖音以后换成什么拦法，只要弹幕没
+        连上就会报出来，不会再出现录完一整场才发现 jsonl 是空的。
+        """
+        now = time.time()
+        with self._rooms_lock:
+            channels = list(self._rooms.values())
+        for ch in channels:
+            if ch.warned or ch.connected.is_set():
+                continue
+            if now - ch.attached_at < WS_CONNECT_TIMEOUT:
+                continue
+            ch.warned = True
+            log.error("[%s] %.0f 秒内没能挂上弹幕 WebSocket，这场大概率一条弹幕都收不到。%s",
+                      ch.web_rid, WS_CONNECT_TIMEOUT,
+                      BLOCKED_ADVICE if ch.blocked else
+                      "画面不受影响，仍在正常录制。")
+
     def _apply_retries(self, context, pages: Dict[str, object]) -> None:
         if not self._pending:
             return
@@ -296,6 +325,13 @@ class BrowserHub:
         log.info("[%s] 打开直播间页面（当前 %d 个）", rid, len(pages))
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
         self._retries.pop(rid, None)
+
+        # goto 成功不等于进了直播间：被风控挡住时返回的是验证页，HTTP 也是 200
+        blocked = _verify_page(page)
+        channel.blocked = blocked
+        if blocked:
+            log.error("[%s] 被抖音风控挡在验证页（%s），本场收不到弹幕。%s",
+                      rid, blocked, BLOCKED_ADVICE)
 
     # -- Playwright 回调 --------------------------------------------------
 
@@ -328,6 +364,24 @@ class BrowserHub:
         if info:
             log.info("[%s] 从页面拿到直播间信息：%s", channel.web_rid, info.describe())
             channel.on_room_info(info)
+
+
+BLOCKED_ADVICE = ("到「设置 → 显示浏览器窗口」打开有头模式，在弹出的窗口里"
+                  "自己过一次验证；配合「保持登录态」，验证结果会留在本地 "
+                  "profile 里，之后不用每次都做。")
+
+
+def _verify_page(page) -> str:
+    """判断当前页面是不是风控的验证中间页，是就返回标题（或 URL）。"""
+    try:
+        title = page.title() or ""
+        url = page.url or ""
+    except Exception:                           # noqa: BLE001 - 页面可能已经关了
+        return ""
+    blob = (title + " " + url).lower()
+    if any(hint in blob for hint in VERIFY_HINTS):
+        return title or url
+    return ""
 
 
 def _quietly(fn) -> None:
