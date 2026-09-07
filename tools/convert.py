@@ -67,8 +67,15 @@ def main() -> int:
     p.add_argument("--duration", type=float, default=10.0,
                    help="一条弹幕横穿屏幕的秒数（默认 10）")
     p.add_argument("--opacity", type=float, default=0.85, help="不透明度 0~1")
+    p.add_argument("--style", choices=[subtitle.SCROLL, subtitle.CHAT],
+                   default=subtitle.CHAT,
+                   help="chat 左下角聊天流（默认，像直播间）/ scroll 滚动弹幕")
+    p.add_argument("--lines", type=int, default=8,
+                   help="chat 样式：左下角最多同时显示几条（默认 8）")
+    p.add_argument("--rate", type=float, default=2.5,
+                   help="chat 样式：每秒最多显示几条，超了丢弃（默认 2.5）")
     p.add_argument("--reserve", type=float, default=0.4,
-                   help="屏幕下方留白比例，避免挡字幕（默认 0.4）")
+                   help="scroll 样式：屏幕下方留白比例，避免挡字幕（默认 0.4）")
     p.add_argument("--ffmpeg", default="", help="ffmpeg 路径（--embed 时用）")
     args = p.parse_args()
 
@@ -87,7 +94,8 @@ def main() -> int:
 
     style = subtitle.Style(width=args.width, height=args.height, font=args.font,
                            size=args.size, duration=args.duration,
-                           opacity=args.opacity, reserve=args.reserve)
+                           opacity=args.opacity, reserve=args.reserve,
+                           mode=args.style, lines=args.lines, max_rate=args.rate)
     base = args.jsonl.with_suffix("")
 
     if args.ass:

@@ -68,6 +68,7 @@ class Options:
 
     embed_subtitle: bool = False            # 录完把弹幕作为软字幕封进 mkv
     subtitle_replace: bool = True           # 封装成功后用 mkv 替换原视频
+    subtitle_style: str = subtitle.CHAT     # chat 左下角聊天流 / scroll 滚动弹幕
     subtitle_size: int = 48
     subtitle_duration: float = 10.0
     subtitle_reserve: float = 0.4
@@ -413,7 +414,8 @@ class Recorder:
         try:
             subtitle.process(
                 self.ffmpeg, jsonl, videos, offsets,
-                style=subtitle.Style(size=self.opts.subtitle_size,
+                style=subtitle.Style(mode=self.opts.subtitle_style,
+                                     size=self.opts.subtitle_size,
                                      duration=self.opts.subtitle_duration,
                                      reserve=self.opts.subtitle_reserve),
                 kinds=self.opts.subtitle_kinds,

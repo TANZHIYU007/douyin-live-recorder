@@ -153,6 +153,7 @@ class MainWindow(QMainWindow):
             headless=not s.headful,
             embed_subtitle=s.embed_subtitle,
             subtitle_replace=s.subtitle_replace,
+            subtitle_style=s.subtitle_style,
             subtitle_size=s.subtitle_size,
             subtitle_duration=s.subtitle_duration,
             subtitle_reserve=s.subtitle_reserve,
@@ -924,7 +925,8 @@ class MainWindow(QMainWindow):
         try:
             results = subtitle.process(
                 ffmpeg, jsonl, videos,
-                style=subtitle.Style(size=s.subtitle_size,
+                style=subtitle.Style(mode=s.subtitle_style,
+                                     size=s.subtitle_size,
                                      duration=s.subtitle_duration,
                                      reserve=s.subtitle_reserve),
                 replace=s.subtitle_replace,

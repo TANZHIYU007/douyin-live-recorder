@@ -29,6 +29,9 @@ ALL_KINDS = [k for k in ("chat", "emoji", "gift", "social", "member", "like",
                          "control", "fansclub", "user_seq", "stats", "room_notice")
              if k in set(KIND_BY_METHOD.values())]
 
+SUBTITLE_STYLES = [("左下角聊天流（像直播间）", "chat"),
+                   ("滚动弹幕（飘过屏幕）", "scroll")]
+
 QUALITIES = [("原画", "origin"), ("蓝光", "FULL_HD1"), ("超清", "HD1"),
              ("高清", "SD1"), ("标清", "SD2")]
 
@@ -65,6 +68,7 @@ class AppSettings:
     preview_fps: int = 0                # 0 = 跟随直播源，不限帧
     embed_subtitle: bool = True         # 录完自动把弹幕封成软字幕
     subtitle_replace: bool = True       # 封装成功后用 mkv 替换原视频
+    subtitle_style: str = "chat"        # chat 左下角聊天流 / scroll 滚动弹幕
     subtitle_size: int = 48
     subtitle_duration: float = 10.0
     subtitle_reserve: float = 0.4
@@ -184,6 +188,17 @@ class SettingsDialog(QDialog):
         sub_card.body.addWidget(self.cb_embed)
         sub_card.body.addWidget(self.cb_sub_replace)
 
+        self.sub_style = QComboBox()
+        for label, value in SUBTITLE_STYLES:
+            self.sub_style.addItem(label, value)
+        self.sub_style.setCurrentIndex(
+            next((i for i, (_, v) in enumerate(SUBTITLE_STYLES)
+                  if v == settings.subtitle_style), 0))
+        self.sub_style.setToolTip(
+            "聊天流：画面左下角堆成一列「用户名：内容」，和抖音直播间一个样\n"
+            "滚动弹幕：一条条从右往左飘过屏幕")
+        sub_card.body.addWidget(Field("弹幕样式", self.sub_style, stretch=1))
+
         self.sub_size = QSpinBox()
         self.sub_size.setRange(16, 120)
         self.sub_size.setSuffix(" px")
@@ -192,7 +207,8 @@ class SettingsDialog(QDialog):
         self.sub_speed.setRange(4, 30)
         self.sub_speed.setSuffix(" 秒")
         self.sub_speed.setValue(int(settings.subtitle_duration))
-        self.sub_speed.setToolTip("一条弹幕从右侧划到左侧消失所需的时间")
+        self.sub_speed.setToolTip("滚动样式：一条从右划到左消失的时间\n"
+                                  "聊天流样式：一条最多在屏幕上停留多久")
         sub_card.body.addWidget(Field("字号 / 时长",
                                       _row([(self.sub_size, 1), (self.sub_speed, 1)]),
                                       stretch=1))
@@ -260,7 +276,8 @@ class SettingsDialog(QDialog):
         self.resize(560, min(860, max(420, avail - 120)))
 
     def _sync_subtitle_enabled(self, on: bool) -> None:
-        for w in (self.cb_sub_replace, self.sub_size, self.sub_speed, self.sub_reserve):
+        for w in (self.cb_sub_replace, self.sub_style, self.sub_size,
+                  self.sub_speed, self.sub_reserve):
             w.setEnabled(on)
 
     def _pick_folder(self) -> None:
@@ -284,6 +301,7 @@ class SettingsDialog(QDialog):
         settings.preview_fps = self.pv_fps.currentData()
         settings.embed_subtitle = self.cb_embed.isChecked()
         settings.subtitle_replace = self.cb_sub_replace.isChecked()
+        settings.subtitle_style = self.sub_style.currentData()
         settings.subtitle_size = self.sub_size.value()
         settings.subtitle_duration = float(self.sub_speed.value())
         settings.subtitle_reserve = self.sub_reserve.value() / 100.0
