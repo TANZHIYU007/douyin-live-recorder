@@ -10,13 +10,14 @@ import json
 import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import List
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
-                               QDialogButtonBox, QFileDialog, QGridLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QScrollArea, QSpinBox, QVBoxLayout, QWidget)
+                               QDialogButtonBox, QDoubleSpinBox, QFileDialog,
+                               QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                               QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
+                               QWidget)
 
 from .. import paths, runtime
 from ..messages import DEFAULT_KINDS, KIND_BY_METHOD
@@ -72,6 +73,7 @@ class AppSettings:
     subtitle_size: int = 48
     subtitle_duration: float = 10.0
     subtitle_reserve: float = 0.4
+    subtitle_delay: float = 0.0         # 弹幕整体后推的秒数，抵掉拉流延迟
     theme: str = "light"
     rooms: List[str] = field(default_factory=list)
 
@@ -88,7 +90,7 @@ class AppSettings:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return cls()
-        known = {f for f in cls.__dataclass_fields__}      # 忽略旧版本残留的字段
+        known = set(cls.__dataclass_fields__)              # 忽略旧版本残留的字段
         return cls(**{k: v for k, v in data.items() if k in known})
 
     def save(self) -> None:
@@ -218,6 +220,20 @@ class SettingsDialog(QDialog):
         self.sub_reserve.setValue(int(settings.subtitle_reserve * 100))
         self.sub_reserve.setToolTip("屏幕下方留出这么多不放弹幕，免得挡住主播")
         sub_card.body.addWidget(Field("下方留白", self.sub_reserve))
+
+        # 弹幕比画面早到。WebSocket 几乎是实时的，而 FLV/HLS 要过 CDN 的缓冲，
+        # 一般慢几秒 —— 不补这一下，观众还没听见主播说什么，回应已经飘过去了。
+        self.sub_delay = QDoubleSpinBox()
+        self.sub_delay.setRange(-30.0, 60.0)
+        self.sub_delay.setSingleStep(0.5)
+        self.sub_delay.setDecimals(1)
+        self.sub_delay.setSuffix(" 秒")
+        self.sub_delay.setValue(settings.subtitle_delay)
+        self.sub_delay.setToolTip(
+            "弹幕整体往后推这么多秒，抵掉直播流比弹幕慢的那几秒。\n"
+            "字幕比画面早就调大，晚了就调小（可以填负数）。\n"
+            "只影响生成的字幕，.jsonl 里存的一直是原始时间，随时能重新生成。")
+        sub_card.body.addWidget(Field("弹幕延迟补偿", self.sub_delay))
         self.cb_embed.toggled.connect(self._sync_subtitle_enabled)
         body.addWidget(sub_card)
 
@@ -277,7 +293,7 @@ class SettingsDialog(QDialog):
 
     def _sync_subtitle_enabled(self, on: bool) -> None:
         for w in (self.cb_sub_replace, self.sub_style, self.sub_size,
-                  self.sub_speed, self.sub_reserve):
+                  self.sub_speed, self.sub_reserve, self.sub_delay):
             w.setEnabled(on)
 
     def _pick_folder(self) -> None:
@@ -305,6 +321,7 @@ class SettingsDialog(QDialog):
         settings.subtitle_size = self.sub_size.value()
         settings.subtitle_duration = float(self.sub_speed.value())
         settings.subtitle_reserve = self.sub_reserve.value() / 100.0
+        settings.subtitle_delay = self.sub_delay.value()
         settings.headful = self.cb_headful.isChecked()
         settings.keep_login = self.cb_login.isChecked()
 

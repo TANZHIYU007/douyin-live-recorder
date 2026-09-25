@@ -11,7 +11,10 @@ from pathlib import Path
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
-_ILLEGAL = re.compile(r'[\/:*?"<>|\r\n\t]+')
+# 反斜杠也必须洗掉：Windows 上它是路径分隔符，留着会让录像落到一层
+# 子目录里去，而找产出文件是按「同目录 + 前缀」匹配的 —— 文件找不着，
+# 弹幕字幕就会一声不响地什么都没做。
+_ILLEGAL = re.compile(r'[\\/:*?"<>|\r\n\t]+')
 
 
 def setup_console() -> None:

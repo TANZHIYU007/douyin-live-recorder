@@ -113,7 +113,8 @@ def make_icon() -> Path:
                                QPainter, QPixmap)
     from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication([])
+    # 得留个引用：QApplication 被回收掉的话后面画图就崩了
+    _app = QApplication.instance() or QApplication([])
     BUILD.mkdir(parents=True, exist_ok=True)
     icon_path = BUILD / "icon.ico"
 
@@ -180,10 +181,10 @@ def ensure_unlocked() -> None:
     try:
         with exe.open("r+b"):
             pass
-    except OSError:
+    except OSError as exc:
         raise SystemExit(
             "%s 正被占用，无法覆盖。先关掉正在运行的 %s（任务管理器里也看一眼），"
-            "再重新打包。" % (exe, APP_NAME + ".exe"))
+            "再重新打包。" % (exe, APP_NAME + ".exe")) from exc
 
 
 def run_pyinstaller(icon: Path) -> Path:

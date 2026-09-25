@@ -63,7 +63,7 @@ def find_ffmpeg() -> Path:
 
 def make_icns() -> Path:
     """用 Qt 画出图标再交给 iconutil 转成 icns。"""
-    from PySide6.QtCore import QBuffer, QByteArray, Qt
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import (QColor, QFont, QGuiApplication, QLinearGradient,
                                QPainter, QPixmap)
 

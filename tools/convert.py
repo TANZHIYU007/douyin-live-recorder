@@ -76,6 +76,9 @@ def main() -> int:
                    help="chat 样式：每秒最多显示几条，超了丢弃（默认 2.5）")
     p.add_argument("--reserve", type=float, default=0.4,
                    help="scroll 样式：屏幕下方留白比例，避免挡字幕（默认 0.4）")
+    p.add_argument("--delay", type=float, default=0.0, metavar="秒",
+                   help="弹幕整体往后推的秒数，抵掉直播流比弹幕慢的那几秒。"
+                        "字幕比画面早就调大，晚了填负数（默认 0）")
     p.add_argument("--ffmpeg", default="", help="ffmpeg 路径（--embed 时用）")
     args = p.parse_args()
 
@@ -95,7 +98,8 @@ def main() -> int:
     style = subtitle.Style(width=args.width, height=args.height, font=args.font,
                            size=args.size, duration=args.duration,
                            opacity=args.opacity, reserve=args.reserve,
-                           mode=args.style, lines=args.lines, max_rate=args.rate)
+                           mode=args.style, lines=args.lines, max_rate=args.rate,
+                           delay=args.delay)
     base = args.jsonl.with_suffix("")
 
     if args.ass:

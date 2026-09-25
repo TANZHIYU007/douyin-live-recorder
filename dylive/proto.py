@@ -44,6 +44,10 @@ def decode(buf: bytes) -> Fields:
         if wire == VARINT:
             val, pos = _read_varint(buf, pos)
         elif wire == I64:
+            # 自己先查边界：交给 struct 去撞的话抛的是 struct.error，
+            # 和 varint / LEN 截断时的 EOFError 对不上，调用方没法统一接
+            if pos + 8 > n:
+                raise EOFError("I64 字段被截断")
             val = struct.unpack_from("<Q", buf, pos)[0]
             pos += 8
         elif wire == LEN:
@@ -53,6 +57,8 @@ def decode(buf: bytes) -> Fields:
             val = buf[pos:pos + size]
             pos += size
         elif wire == I32:
+            if pos + 4 > n:
+                raise EOFError("I32 字段被截断")
             val = struct.unpack_from("<I", buf, pos)[0]
             pos += 4
         else:

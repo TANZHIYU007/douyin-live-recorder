@@ -34,7 +34,8 @@ def _on_uncaught(exc_type, exc, tb) -> None:
     sys.stderr.write(text) if sys.stderr else None
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
-        app = QApplication.instance() or QApplication([])
+        # 得留个引用：QApplication 被回收掉的话弹不出对话框
+        _app = QApplication.instance() or QApplication([])
         QMessageBox.critical(
             None, "拾光 出错了",
             "%s\n\n详细信息已写入：\n%s" % (str(exc) or exc_type.__name__, path or "（写入失败）"))

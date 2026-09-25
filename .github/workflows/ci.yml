@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # 同一分支上新的推送直接顶掉还在跑的那次
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 核心逻辑：protobuf 解码、房间解析、字幕排版、ffmpeg 命令拼装。
+  # 这些都是纯函数，不需要 Qt、不需要浏览器、不联网，所以两个系统都跑一遍。
+  core:
+    name: 核心逻辑 (${{ matrix.os }} / py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: 装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pytest ruff
+
+      - name: ruff
+        run: ruff check .
+
+      - name: pytest
+        run: python -m pytest
+
+  # 界面那部分单独一个 job：PySide6 有一百多 MB，没必要在每个组合里都装一遍。
+  gui:
+    name: 界面 (ubuntu / py3.12)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 装 Qt 需要的系统库
+        # 无头环境里 PySide6 仍然要链接 libEGL 才 import 得进来，
+        # 哪怕后面用的是 offscreen 平台插件
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libdbus-1-3
+
+      - name: 装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pytest ruff PySide6
+
+      - name: pytest（含界面用例）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest

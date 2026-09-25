@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import threading
 from collections import deque
@@ -29,8 +28,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGridLayout,
 
 from .. import room as room_mod
 from .. import paths, runtime, subtitle, video
-from ..manager import IDLE, RECORDING, RoomManager
-from ..preview import FOLLOW_SOURCE
+from ..manager import RECORDING, RoomManager
 from ..recorder import Options
 from ..utils import UA, setup_console
 from . import theme
@@ -157,6 +155,7 @@ class MainWindow(QMainWindow):
             subtitle_size=s.subtitle_size,
             subtitle_duration=s.subtitle_duration,
             subtitle_reserve=s.subtitle_reserve,
+            subtitle_delay=s.subtitle_delay,
             watch=True,                 # 监测列表天然就是守候模式
         )
 
@@ -928,7 +927,8 @@ class MainWindow(QMainWindow):
                 style=subtitle.Style(mode=s.subtitle_style,
                                      size=s.subtitle_size,
                                      duration=s.subtitle_duration,
-                                     reserve=s.subtitle_reserve),
+                                     reserve=s.subtitle_reserve,
+                                     delay=s.subtitle_delay),
                 replace=s.subtitle_replace,
                 progress=self.bridge.subtitle_log.emit)
         except Exception as exc:            # noqa: BLE001 - 报给界面

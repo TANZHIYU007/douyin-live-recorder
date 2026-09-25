@@ -80,6 +80,15 @@ class Style:
     opacity: float = 0.85
     reserve: float = 0.4        # 滚动样式专用：屏幕下方留白比例，别挡住主播
 
+    # 弹幕整体往后推的秒数。弹幕和画面走的是两条完全不同的链路：WebSocket 几乎
+    # 是实时的，而 FLV/HLS 要经过 CDN 的缓冲，通常慢 3~8 秒。两边用同一个零点
+    # 对齐之后，弹幕仍然会系统性地**早于**画面 —— 观众还没看到主播说那句话，
+    # 回应已经飘过去了。这个值把弹幕整体往后推，抵掉那段拉流延迟。
+    #
+    # 只在生成字幕时平移，jsonl 里存的永远是原始 offset：延迟估错了可以重新
+    # 生成，不会污染原始记录。
+    delay: float = 0.0
+
     # -- 聊天流样式专用 --
     mode: str = SCROLL
     lines: int = 8              # 左下角最多同时显示几条
@@ -161,13 +170,20 @@ def build_ass(events: Iterable[dict], out: Path, style: Optional[Style] = None,
 
 def _pick(events, st: Style, shift: float,
           window: Optional[Tuple[float, float]]) -> List[Tuple[float, dict]]:
-    """筛掉不属于这一段的弹幕，并把时间平移到这一段自己的 0 点。"""
+    """筛掉不属于这一段的弹幕，并把时间平移到这一段自己的 0 点。
+
+    延迟补偿要在**分段之前**加上去：推后几秒之后，本来卡在上一段末尾的弹幕
+    应该落到下一段开头。先补偿再按窗口切，顺序反了第二段开头就会缺一截。
+    """
     out: List[Tuple[float, dict]] = []
     for ev in events:
-        raw = float(ev.get("offset", 0.0))
-        if window is not None and not (window[0] <= raw < window[1]):
+        try:
+            moment = float(ev.get("offset", 0.0)) + st.delay
+        except (TypeError, ValueError):
+            continue                # offset 坏了就跳过这一条，不要整场失败
+        if window is not None and not (window[0] <= moment < window[1]):
             continue
-        t = raw - shift
+        t = moment - shift
         if t < -st.duration:        # 完全在这一段之前，跳过
             continue
         out.append((max(0.0, t), ev))

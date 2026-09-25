@@ -72,6 +72,7 @@ class Options:
     subtitle_size: int = 48
     subtitle_duration: float = 10.0
     subtitle_reserve: float = 0.4
+    subtitle_delay: float = 0.0             # 弹幕整体后推的秒数，抵掉拉流延迟
     subtitle_kinds: tuple = subtitle.DEFAULT_KINDS
 
     watch: bool = False                     # 未开播时守候到开播
@@ -106,7 +107,7 @@ class Recorder:
         self._recording = False
         self._post = ""
         self._engine = None             # 弹幕引擎，界面要读它的连接状态
-        self._runs: List[Tuple[video.VideoRecorder, float]] = []
+        self._runs: List[video.VideoRecorder] = []
 
     # -- 对外 -------------------------------------------------------------
 
@@ -307,9 +308,11 @@ class Recorder:
                 segment_seconds=self.opts.segment_seconds,
                 extra_args=self.opts.extra_ffmpeg_args,
             )
-            # 记下这一路是从整场的第几秒开始的 —— 断流重连后的片段，
-            # 弹幕字幕要按这个值平移，否则第二段开始就全错位
-            self._runs.append((rec, max(0.0, time.time() - self._start_time)))
+            # 每一路都得知道自己是从整场的第几秒开始的 —— 断流重连后的片段，
+            # 弹幕字幕要按这个值平移，否则第二段开始就全错位。具体秒数留到
+            # _collect_parts 再算：此刻还不知道 ffmpeg 要花多久才连上 CDN，
+            # 而那段时间不属于视频内容。
+            self._runs.append(rec)
             rec.start()
             self._watch_ffmpeg(rec)
             rec.stop()
@@ -364,6 +367,9 @@ class Recorder:
         while rec.alive:
             if self._stop.is_set() or self._ended_by_anchor.is_set():
                 return
+            # 还没写出第一个字节时用 0.1 秒的步长盯着 —— 那一刻是弹幕字幕的
+            # 零点，用 1 秒的步长会凭空引入最多 1 秒的系统性偏差
+            flowing = rec.note_first_data()
             if time.time() >= next_check:
                 next_check = time.time() + self.opts.check_interval
                 fresh = room.fetch(self.web_rid, self.session)
@@ -374,7 +380,7 @@ class Recorder:
                     log.info("轮询发现已下播")
                     self._ended_by_anchor.set()
                     return
-            time.sleep(1.0)
+            time.sleep(1.0 if flowing else 0.1)
 
     def _danmaku_only_loop(self) -> None:
         log.info("只录弹幕（--no-video）")
@@ -384,11 +390,15 @@ class Recorder:
     # -- 字幕 -------------------------------------------------------------
 
     def _collect_parts(self) -> Tuple[List[Path], List[float]]:
-        """列出本场所有视频文件及各自相对整场开始的秒数。"""
+        """列出本场所有视频文件及各自相对整场开始的秒数。
+
+        每一路的零点取 ffmpeg **真的开始写盘**那一刻，不是进程启动那一刻：
+        中间那 1~3 秒是连 CDN 和等关键帧，没有画面，算进去字幕就整体偏早。
+        """
         videos: List[Path] = []
         offsets: List[float] = []
-        for rec, base in self._runs:
-            acc = base
+        for rec in self._runs:
+            acc = max(0.0, rec.zero_at() - self._start_time)
             for path in rec.files():
                 videos.append(path)
                 offsets.append(acc)
@@ -417,7 +427,8 @@ class Recorder:
                 style=subtitle.Style(mode=self.opts.subtitle_style,
                                      size=self.opts.subtitle_size,
                                      duration=self.opts.subtitle_duration,
-                                     reserve=self.opts.subtitle_reserve),
+                                     reserve=self.opts.subtitle_reserve,
+                                     delay=self.opts.subtitle_delay),
                 kinds=self.opts.subtitle_kinds,
                 replace=self.opts.subtitle_replace,
                 progress=note)
