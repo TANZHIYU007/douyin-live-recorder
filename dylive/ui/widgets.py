@@ -425,7 +425,10 @@ class KindFilter(QSortFilterProxyModel):
 
     def set_kinds(self, kinds: Optional[Sequence[str]]) -> None:
         self.kinds = set(kinds) if kinds is not None else None
-        self.invalidateFilter()
+        # 只按行过滤，列和排序都没动，所以用这个更精确的版本。
+        # （PySide6 把它和 invalidateFilter() 都标成了 deprecated，但 Qt 那边
+        # 两个都还在，没有替代品 —— 警告忽略即可。）
+        self.invalidateRowsFilter()
 
     def filterAcceptsRow(self, row: int, parent: QModelIndex) -> bool:
         if self.kinds is None:

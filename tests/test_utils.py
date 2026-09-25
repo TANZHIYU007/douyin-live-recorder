@@ -1,13 +1,16 @@
-"""文件名清洗和时间格式化。
+"""文件名清洗、时间格式化、弹幕落盘和日志。
 
 直播间标题什么字符都可能有，落盘之前必须洗干净 —— 洗不干净就是整场录不下来。
 """
 
+import json
+import logging
+
 import pytest
 
 from dylive import utils
-from dylive.writers import JsonlWriter, WriterGroup, Writer, XmlWriter
 from dylive.messages import Event
+from dylive.writers import JsonlWriter, Writer, WriterGroup, XmlWriter
 
 
 # --------------------------------------------------------------------------
@@ -85,7 +88,6 @@ def test_jsonl_一行一条(tmp_path):
 
 
 def test_jsonl_不带_extra_时省掉那个字段(tmp_path):
-    import json
     path = tmp_path / "a.jsonl"
     w = JsonlWriter(path)
     w.write(event())
@@ -133,3 +135,76 @@ def test_writer_group_里一个坏了不影响别的(tmp_path):
 
     assert good.n == 2
     assert group.total == 2
+
+
+# --------------------------------------------------------------------------
+# 日志落盘
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def clean_root_logger():
+    """用完把根 logger 恢复原样，免得污染别的用例。"""
+    root = logging.getLogger()
+    before = list(root.handlers)
+    before_level = root.level
+    yield root
+    for h in list(root.handlers):
+        if h not in before:
+            root.removeHandler(h)
+            h.close()
+    root.setLevel(before_level)
+
+
+def test_日志真的写进文件(tmp_path, monkeypatch, clean_root_logger):
+    monkeypatch.setattr(utils, "log_dir", lambda: tmp_path / "logs")
+    clean_root_logger.setLevel(logging.DEBUG)
+
+    path = utils.add_rotating_file_log()
+    assert path is not None and path.parent == tmp_path / "logs"
+
+    logging.getLogger("测试").info("录制开始")
+    for h in clean_root_logger.handlers:
+        h.flush()
+    assert "录制开始" in path.read_text(encoding="utf-8")
+
+
+def test_默认不记_DEBUG_打开详细日志才记(tmp_path, monkeypatch, clean_root_logger):
+    monkeypatch.setattr(utils, "log_dir", lambda: tmp_path / "logs")
+    clean_root_logger.setLevel(logging.DEBUG)
+
+    path = utils.add_rotating_file_log(verbose=False)
+    logging.getLogger("测试").debug("握手细节")
+    for h in clean_root_logger.handlers:
+        h.flush()
+    assert "握手细节" not in path.read_text(encoding="utf-8")
+
+    utils.add_rotating_file_log(verbose=True)          # 改级别，不新挂一份
+    logging.getLogger("测试").debug("握手细节")
+    for h in clean_root_logger.handlers:
+        h.flush()
+    assert "握手细节" in path.read_text(encoding="utf-8")
+
+
+def test_重复调用不会挂出两份处理器(tmp_path, monkeypatch, clean_root_logger):
+    monkeypatch.setattr(utils, "log_dir", lambda: tmp_path / "logs")
+    before = len(clean_root_logger.handlers)
+
+    utils.add_rotating_file_log()
+    utils.add_rotating_file_log()
+    utils.add_rotating_file_log(verbose=True)
+
+    assert len(clean_root_logger.handlers) == before + 1
+
+
+def test_目录建不起来时不崩只是没有文件日志(tmp_path, monkeypatch, clean_root_logger):
+    blocker = tmp_path / "被占了"
+    blocker.write_text("我是个文件，不是目录", encoding="utf-8")
+    monkeypatch.setattr(utils, "log_dir", lambda: blocker / "logs")
+
+    assert utils.add_rotating_file_log() is None
+
+
+def test_压掉吵闹的第三方日志(clean_root_logger):
+    utils.quiet_noisy_loggers()
+    assert logging.getLogger("websocket").level == logging.CRITICAL
+    assert logging.getLogger("urllib3").level == logging.WARNING

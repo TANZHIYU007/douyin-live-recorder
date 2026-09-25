@@ -74,6 +74,10 @@ class AppSettings:
     subtitle_duration: float = 10.0
     subtitle_reserve: float = 0.4
     subtitle_delay: float = 0.0         # 弹幕整体后推的秒数，抵掉拉流延迟
+    verbose_log: bool = False           # 日志文件里记到 DEBUG
+    tray: bool = True                   # 显示系统托盘图标
+    minimize_to_tray: bool = False      # 关窗口时收进托盘而不是退出
+    notify_live: bool = True            # 开播/收工弹系统通知
     theme: str = "light"
     rooms: List[str] = field(default_factory=list)
 
@@ -256,6 +260,27 @@ class SettingsDialog(QDialog):
         adv.body.addWidget(Field("预览帧率", self.pv_fps))
         adv.body.addWidget(separator())
 
+        self.cb_tray = QCheckBox("显示系统托盘图标")
+        self.cb_tray.setChecked(settings.tray)
+        self.cb_minimize = QCheckBox("关闭窗口时收进托盘继续录，不退出程序")
+        self.cb_minimize.setChecked(settings.minimize_to_tray)
+        self.cb_minimize.setToolTip(
+            "真正退出请用托盘菜单里的「退出拾光」。")
+        self.cb_notify = QCheckBox("开播和收工时弹系统通知")
+        self.cb_notify.setChecked(settings.notify_live)
+        for w in (self.cb_tray, self.cb_minimize, self.cb_notify):
+            adv.body.addWidget(w)
+        self.cb_tray.toggled.connect(self._sync_tray_enabled)
+        adv.body.addWidget(separator())
+
+        self.cb_verbose = QCheckBox("详细日志（把 DEBUG 也写进日志文件，排查弹幕问题时打开）")
+        self.cb_verbose.setChecked(settings.verbose_log)
+        self.cb_verbose.setToolTip(
+            "只影响日志**文件**，界面上显示的还是 INFO 及以上。\n"
+            "「弹幕一条都收不到」这类问题，有用的信息基本都在 DEBUG 里。")
+        adv.body.addWidget(self.cb_verbose)
+        adv.body.addWidget(separator())
+
         self.cb_headful = QCheckBox("显示浏览器窗口（被风控挡住时可用它手动过验证）")
         self.cb_headful.setChecked(settings.headful)
         self.cb_login = QCheckBox("保持登录态（登录后弹幕更完整，所有房间共用）")
@@ -269,6 +294,7 @@ class SettingsDialog(QDialog):
         body.addWidget(adv)
 
         self._sync_subtitle_enabled(settings.embed_subtitle)
+        self._sync_tray_enabled(settings.tray)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("保存")
@@ -290,6 +316,11 @@ class SettingsDialog(QDialog):
         screen = self.screen() or QApplication.primaryScreen()
         avail = screen.availableGeometry().height() if screen else 900
         self.resize(560, min(860, max(420, avail - 120)))
+
+    def _sync_tray_enabled(self, on: bool) -> None:
+        """没有托盘图标的话，「收进托盘」和托盘通知都无从谈起。"""
+        for w in (self.cb_minimize, self.cb_notify):
+            w.setEnabled(on)
 
     def _sync_subtitle_enabled(self, on: bool) -> None:
         for w in (self.cb_sub_replace, self.sub_style, self.sub_size,
@@ -322,6 +353,10 @@ class SettingsDialog(QDialog):
         settings.subtitle_duration = float(self.sub_speed.value())
         settings.subtitle_reserve = self.sub_reserve.value() / 100.0
         settings.subtitle_delay = self.sub_delay.value()
+        settings.tray = self.cb_tray.isChecked()
+        settings.minimize_to_tray = self.cb_minimize.isChecked()
+        settings.notify_live = self.cb_notify.isChecked()
+        settings.verbose_log = self.cb_verbose.isChecked()
         settings.headful = self.cb_headful.isChecked()
         settings.keep_login = self.cb_login.isChecked()
 
