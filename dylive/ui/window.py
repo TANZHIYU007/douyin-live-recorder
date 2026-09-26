@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import threading
 from collections import deque
@@ -29,14 +28,15 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGridLayout,
 
 from .. import room as room_mod
 from .. import paths, runtime, subtitle, video
-from ..manager import IDLE, RECORDING, RoomManager
-from ..preview import FOLLOW_SOURCE
+from ..manager import PROCESSING, RECORDING, RoomManager
 from ..recorder import Options
-from ..utils import UA, setup_console
+from ..utils import (UA, add_rotating_file_log, log_dir,
+                     quiet_noisy_loggers, setup_console)
 from . import theme
 from .first_run import ensure_runtime
 from .preview_feed import PreviewFeed
 from .settings import AppSettings, SettingsDialog
+from .tray import Tray
 from .widgets import (Card, DanmakuModel, KindFilter, PreviewView, RoomHeader,
                       RoomRow, StatTile, set_pill)
 
@@ -59,8 +59,14 @@ MIN_TABLE_WIDTH = 430   # 弹幕表最窄也要这么宽，不然内容列没法
 
 
 class QueueLogHandler(logging.Handler):
+    """界面上那块「运行日志」。
+
+    刻意只收 INFO 及以上：根 logger 开到 DEBUG 是为了让日志**文件**能记全，
+    界面上跟着刷 DEBUG 的话，有用的信息会被握手细节和心跳淹掉。
+    """
+
     def __init__(self, limit: int = 5000):
-        super().__init__()
+        super().__init__(level=logging.INFO)
         self.lines: deque = deque(maxlen=limit)
         self._lock = threading.Lock()
         self.setFormatter(logging.Formatter("%(asctime)s  %(name)-12s %(message)s",
@@ -112,9 +118,17 @@ class MainWindow(QMainWindow):
         self.preview_feed = PreviewFeed(self)
         self._ffmpeg = ""
 
+        # 上一次看到的状态，用来认出「开播了」和「收工了」这两个瞬间
+        self._room_states: Dict[str, str] = {}
+        # 录制中最后一次看到的时长和大小 —— 收工通知要报这两个数，
+        # 而那时候 recorder 已经把状态清掉了
+        self._last_take: Dict[str, tuple] = {}
+        self._quitting = False
+
         self._build()
         self._connect()
         self._apply_view_filter()
+        self.tray = self._make_tray()
 
         self.tick = QTimer(self)
         self.tick.timeout.connect(self._on_tick)
@@ -157,6 +171,7 @@ class MainWindow(QMainWindow):
             subtitle_size=s.subtitle_size,
             subtitle_duration=s.subtitle_duration,
             subtitle_reserve=s.subtitle_reserve,
+            subtitle_delay=s.subtitle_delay,
             watch=True,                 # 监测列表天然就是守候模式
         )
 
@@ -384,7 +399,24 @@ class MainWindow(QMainWindow):
         log_wrap.setObjectName("card")
         log_lay = QVBoxLayout(log_wrap)
         log_lay.setContentsMargins(6, 6, 6, 6)
-        log_lay.addWidget(self.log_view)
+        log_lay.setSpacing(6)
+        log_lay.addWidget(self.log_view, 1)
+
+        # 界面里这块只留最近几千行，而且关掉窗口就没了。真正排查问题要翻
+        # 的是落盘的那份，所以这里得有个够显眼的入口。
+        log_foot = QWidget()
+        foot_lay = QHBoxLayout(log_foot)
+        foot_lay.setContentsMargins(2, 0, 2, 0)
+        foot_lay.setSpacing(8)
+        self.log_hint = QLabel("这里只显示最近的日志，完整记录写在日志文件里")
+        self.log_hint.setObjectName("hint")
+        foot_lay.addWidget(self.log_hint)
+        foot_lay.addStretch(1)
+        self.log_dir_btn = QPushButton("打开日志目录")
+        self.log_dir_btn.setObjectName("ghost")
+        self.log_dir_btn.setToolTip(str(log_dir()))
+        foot_lay.addWidget(self.log_dir_btn)
+        log_lay.addWidget(log_foot)
         tabs.addTab(log_wrap, "运行日志")
         # 竖屏预览放左边、弹幕放右边，比上下叠更省地方；中缝可以拖。
         # 预览外面套一列：顶上放个和右侧标签栏等高的标题，两边顶边就对齐了；
@@ -438,6 +470,7 @@ class MainWindow(QMainWindow):
         self.toggle_btn.clicked.connect(self._toggle_selected)
         self.remove_btn.clicked.connect(self._remove_selected)
         self.open_btn.clicked.connect(self._open_folder)
+        self.log_dir_btn.clicked.connect(self._open_log_folder)
         self.subtitle_btn.clicked.connect(self._embed_subtitles)
         self.bridge.subtitle_log.connect(self._log)
         self.bridge.subtitle_done.connect(self._on_subtitle_done)
@@ -448,6 +481,23 @@ class MainWindow(QMainWindow):
         self.bridge.resolve_failed.connect(self._on_resolve_failed)
         self.bridge.avatar_ready.connect(self._on_avatar)
         self._refresh_theme_button()
+
+    def _make_tray(self) -> Tray:
+        return Tray(self, on_show=self._show_from_tray,
+                    on_start_all=self._start_all, on_stop_all=self._stop_all,
+                    on_quit=self._quit_from_tray,
+                    enabled=self.settings.tray)
+
+    def _show_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self) -> None:
+        """托盘菜单里的「退出拾光」—— 这才是真退出。"""
+        self._quitting = True
+        self._show_from_tray()      # 可能还要弹「有房间在录，确定退出吗」
+        self.close()
 
     # -- 房间增删 ---------------------------------------------------------
 
@@ -636,9 +686,24 @@ class MainWindow(QMainWindow):
             return
         before = (self.settings.headful, self.settings.keep_login)
         before_pv = (self.settings.preview_width, self.settings.preview_fps)
+        before_verbose = self.settings.verbose_log
+        before_tray = self.settings.tray
         dialog.apply_to(self.settings)
         self.settings.save()
         self._log("设置已保存。")
+
+        if before_tray != self.settings.tray:
+            self.tray.hide()
+            self.tray = self._make_tray()
+            app = QApplication.instance()
+            if app is not None:
+                app.setQuitOnLastWindowClosed(not self.tray.available)
+            self._log("托盘图标已%s。" % ("打开" if self.settings.tray else "关闭"))
+
+        if before_verbose != self.settings.verbose_log:
+            # 只是换个处理器的级别，立刻生效，不用重启
+            add_rotating_file_log(self.settings.verbose_log)
+            self._log("详细日志已%s。" % ("打开" if self.settings.verbose_log else "关闭"))
 
         if before != (self.settings.headful, self.settings.keep_login):
             if self.manager.active_count:
@@ -820,14 +885,52 @@ class MainWindow(QMainWindow):
             if chats:
                 bits.append("💬 %d" % chats)
             row.update_row(entry.display_name(), state, "  ·  ".join(bits))
+            self._note_state(entry, state, st)
 
         self.count_label.setText("%d 个房间" % len(self.rows))
-        self.summary.setText("录制中 %d / %d  ·  本次共写入 %s"
-                             % (recording, len(self.rows), _human(total)))
+        summary = "录制中 %d / %d  ·  本次共写入 %s" % (recording, len(self.rows),
+                                                 _human(total))
+        self.summary.setText(summary)
+        self.tray.set_active(recording > 0, summary)
         entry = self.manager.get(self.selected or "")
         self.toggle_btn.setText("停止" if (entry and entry.active) else "开始")
         self.toggle_btn.setEnabled(entry is not None)
         self.remove_btn.setEnabled(entry is not None)
+
+    def _note_state(self, entry, state: str, st) -> None:
+        """认出「开播了」和「收工了」这两个瞬间，该通知就通知。
+
+        守候的意义就是人不用盯着，那这两个时刻就得主动推过来。只在状态真的
+        翻转时发 —— 按每 120ms 的刷新频率，少判一下就是刷屏。
+        """
+        rid = entry.web_rid
+        before = self._room_states.get(rid)
+        self._room_states[rid] = state
+
+        if state == RECORDING:
+            # 收工通知要报时长和大小，而那时 recorder 已经把状态清掉了，
+            # 所以趁在录的时候一直记着最后一眼看到的数
+            self._last_take[rid] = (st.elapsed, st.total_bytes)
+
+        if before is None or before == state or not self.settings.notify_live:
+            return
+
+        name = entry.display_name()
+        if state == RECORDING:
+            title = (entry.info.title if entry.info else "") or ""
+            self.tray.notify("开播了 · %s" % name,
+                             (title[:40] + "，已开始录制") if title else "已开始录制")
+            self._log("【开播】%s 开始录制" % name)
+        elif before == RECORDING:
+            elapsed, size = self._last_take.pop(rid, (0.0, 0))
+            secs = int(elapsed)
+            detail = "本场 %02d:%02d:%02d，%s" % (
+                secs // 3600, secs % 3600 // 60, secs % 60, _human(size))
+            if state == PROCESSING:
+                self.tray.notify("录完了 · %s" % name, detail + "，正在封装弹幕字幕…")
+            else:
+                self.tray.notify("收工 · %s" % name, detail + "，继续守候下一场")
+            self._log("【收工】%s %s" % (name, detail))
 
     def _refresh_counts(self) -> None:
         self.count_label.setText("%d 个房间" % len(self.rows))
@@ -928,7 +1031,8 @@ class MainWindow(QMainWindow):
                 style=subtitle.Style(mode=s.subtitle_style,
                                      size=s.subtitle_size,
                                      duration=s.subtitle_duration,
-                                     reserve=s.subtitle_reserve),
+                                     reserve=s.subtitle_reserve,
+                                     delay=s.subtitle_delay),
                 replace=s.subtitle_replace,
                 progress=self.bridge.subtitle_log.emit)
         except Exception as exc:            # noqa: BLE001 - 报给界面
@@ -952,6 +1056,15 @@ class MainWindow(QMainWindow):
         path.mkdir(parents=True, exist_ok=True)
         paths.open_in_file_manager(path)
 
+    def _open_log_folder(self) -> None:
+        path = log_dir()
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, APP_NAME, "打不开日志目录：\n%s" % exc)
+            return
+        paths.open_in_file_manager(path)
+
     def _log(self, text: str) -> None:
         self.log_view.appendPlainText(text)
 
@@ -961,6 +1074,15 @@ class MainWindow(QMainWindow):
         self._sync_preview_target()
 
     def closeEvent(self, event) -> None:
+        # 收进托盘继续录。真正的退出走托盘菜单里的「退出拾光」，那条路
+        # 会先把 _quitting 立起来，从这里直接落到下面的收尾逻辑。
+        if (not self._quitting and self.settings.minimize_to_tray
+                and self.tray.available):
+            event.ignore()
+            self.hide()
+            self.tray.explain_hidden_once()
+            return
+
         if self.manager.active_count:
             answer = QMessageBox.question(
                 self, APP_NAME,
@@ -971,9 +1093,15 @@ class MainWindow(QMainWindow):
                 return
         self._stop_preview()
         self.settings.save()
+        self.tray.hide()
         self.manager.shutdown(timeout=120)   # 可能正在封装字幕
         logging.getLogger().removeHandler(self.log_handler)
         event.accept()
+        # 托盘模式下 quitOnLastWindowClosed 是关掉的（见 main()），
+        # 不显式叫一声进程就留在那儿了
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
 
 def _human(num: int) -> str:
@@ -984,15 +1112,19 @@ def _human(num: int) -> str:
 
 def main(argv: Optional[List[str]] = None) -> int:
     setup_console()
-    logging.basicConfig(level=logging.INFO, handlers=[logging.NullHandler()],
+    # 根 logger 开到 DEBUG，各处理器自己再挑：界面只要 INFO，日志文件
+    # 按「详细日志」这个开关决定要不要收 DEBUG
+    logging.basicConfig(level=logging.DEBUG, handlers=[logging.NullHandler()],
                         force=True)
-    logging.getLogger("websocket").setLevel(logging.CRITICAL)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    quiet_noisy_loggers()
 
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName(APP_NAME)
 
     saved = AppSettings.load()
+    logfile = add_rotating_file_log(saved.verbose_log)
+    if logfile:
+        logging.getLogger("ui").info("日志写到 %s", logfile)
     theme.set_mode(saved.theme)
     app.setStyleSheet(theme.stylesheet())
     app.setFont(QFont(paths.ui_font(), 9))
@@ -1004,5 +1136,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     runtime.apply_env()
 
     window = MainWindow()
+    # 有托盘时窗口可以被收起来，这时候「最后一个窗口没了」不代表该退出；
+    # 退出统一由 closeEvent 末尾显式发起
+    app.setQuitOnLastWindowClosed(not window.tray.available)
     window.show()
     return app.exec()

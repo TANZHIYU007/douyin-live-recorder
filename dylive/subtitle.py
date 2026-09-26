@@ -15,11 +15,13 @@ from __future__ import annotations
 import bisect
 import json
 import logging
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from . import runtime
 from .paths import NO_WINDOW, subtitle_font
 
 log = logging.getLogger("subtitle")
@@ -79,6 +81,15 @@ class Style:
     duration: float = 10.0      # 滚动：横穿屏幕的秒数；聊天流：一条最多停留多久
     opacity: float = 0.85
     reserve: float = 0.4        # 滚动样式专用：屏幕下方留白比例，别挡住主播
+
+    # 弹幕整体往后推的秒数。弹幕和画面走的是两条完全不同的链路：WebSocket 几乎
+    # 是实时的，而 FLV/HLS 要经过 CDN 的缓冲，通常慢 3~8 秒。两边用同一个零点
+    # 对齐之后，弹幕仍然会系统性地**早于**画面 —— 观众还没看到主播说那句话，
+    # 回应已经飘过去了。这个值把弹幕整体往后推，抵掉那段拉流延迟。
+    #
+    # 只在生成字幕时平移，jsonl 里存的永远是原始 offset：延迟估错了可以重新
+    # 生成，不会污染原始记录。
+    delay: float = 0.0
 
     # -- 聊天流样式专用 --
     mode: str = SCROLL
@@ -161,13 +172,20 @@ def build_ass(events: Iterable[dict], out: Path, style: Optional[Style] = None,
 
 def _pick(events, st: Style, shift: float,
           window: Optional[Tuple[float, float]]) -> List[Tuple[float, dict]]:
-    """筛掉不属于这一段的弹幕，并把时间平移到这一段自己的 0 点。"""
+    """筛掉不属于这一段的弹幕，并把时间平移到这一段自己的 0 点。
+
+    延迟补偿要在**分段之前**加上去：推后几秒之后，本来卡在上一段末尾的弹幕
+    应该落到下一段开头。先补偿再按窗口切，顺序反了第二段开头就会缺一截。
+    """
     out: List[Tuple[float, dict]] = []
     for ev in events:
-        raw = float(ev.get("offset", 0.0))
-        if window is not None and not (window[0] <= raw < window[1]):
+        try:
+            moment = float(ev.get("offset", 0.0)) + st.delay
+        except (TypeError, ValueError):
+            continue                # offset 坏了就跳过这一条，不要整场失败
+        if window is not None and not (window[0] <= moment < window[1]):
             continue
-        t = raw - shift
+        t = moment - shift
         if t < -st.duration:        # 完全在这一段之前，跳过
             continue
         out.append((max(0.0, t), ev))
@@ -351,11 +369,20 @@ def _clip(text: str, size: int, budget: float) -> str:
 # 封装
 # --------------------------------------------------------------------------
 
+def find_ffprobe(ffmpeg: str) -> str:
+    """优先用打包版内置 ffprobe，再找 ffmpeg 同目录和系统 PATH。"""
+    bundled = runtime.bundled_ffprobe()
+    if bundled:
+        return bundled
+    sibling = Path(ffmpeg).with_name("ffprobe" + Path(ffmpeg).suffix)
+    if sibling.is_file():
+        return str(sibling)
+    return shutil.which("ffprobe") or "ffprobe"
+
+
 def probe(ffmpeg: str, path: Path) -> Dict[str, float]:
     """拿视频的时长和分辨率。ffprobe 和 ffmpeg 在同一个目录。"""
-    ffprobe = str(Path(ffmpeg).with_name("ffprobe" + Path(ffmpeg).suffix))
-    if not Path(ffprobe).is_file():
-        ffprobe = "ffprobe"
+    ffprobe = find_ffprobe(ffmpeg)
     cmd = [ffprobe, "-v", "error", "-select_streams", "v:0",
            "-show_entries", "stream=width,height", "-show_entries", "format=duration",
            "-of", "default=noprint_wrappers=1:nokey=0", str(path)]

@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lumina-dylive"
+version = "1.2.0"
+description = "拾光 Lumina —— 抖音直播录制：画面无损、弹幕结构化，还能把弹幕封成字幕轨"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.44.0"]
+native = ["websocket-client>=1.7.0"]
+gui = ["PySide6>=6.6.0"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+lumina = "main:main"
+
+[tool.setuptools]
+packages = ["dylive", "dylive.ui"]
+py-modules = ["main"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 96
+target-version = "py310"
+# 打包脚本里全是各平台的路径拼接，规则对它们意义不大
+extend-exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+# 先只开「能抓真问题」的那几类：未定义名字、没用到的变量和导入、
+# 明确的陷阱（可变默认值、except 里丢异常……）。
+# 排版类（import 排序、行宽）暂不打开 —— 那会变成一个几百行的纯格式化
+# 提交，把真正的改动埋掉。想整理的时候单独跑一次 ruff check --fix 就行。
+select = ["F", "E9", "B", "C4"]
+ignore = [
+    # 线程边界上「兜住一切」是有意为之，每处都写了为什么
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里要构造边界数据，断言写法也更随意
+"tests/*" = ["E501", "B011"]

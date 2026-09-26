@@ -5,7 +5,7 @@
 
 分两步：
   1. PyInstaller 打出只含 Python + Qt + playwright 驱动的单文件 exe（约 100 MB）；
-  2. 把 Chromium 和 ffmpeg 压成 zip，**追加到 exe 尾部**。
+  2. 把 Chromium、ffmpeg 和 ffprobe 压成 zip，**追加到 exe 尾部**。
 
 第二步是关键。如果把浏览器交给 PyInstaller 打包，单文件模式每次启动都要把
 四百多 MB、几百个文件解压到临时目录，冷启动要几十秒。追加在尾部的话
@@ -17,6 +17,7 @@ PyInstaller 不认识这段数据、不会碰它，程序首次运行自己解�
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import struct
@@ -79,19 +80,33 @@ def playwright_root() -> Path:
     return Path.home() / ".cache" / "ms-playwright"
 
 
+def expected_chromium_revision() -> str:
+    """读取当前 Playwright 驱动要求的 Chromium 修订号。"""
+    try:
+        import playwright
+        manifest = (Path(playwright.__file__).resolve().parent
+                    / "driver" / "package" / "browsers.json")
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return next(str(item["revision"]) for item in data["browsers"]
+                    if item.get("name") == "chromium")
+    except (ImportError, OSError, KeyError, StopIteration, TypeError, ValueError) as exc:
+        raise SystemExit("读不到 Playwright 的 Chromium 版本清单：%s" % exc) from exc
+
+
 def find_chromium() -> Path:
-    """找 Playwright 装好的完整版 Chromium 目录。"""
+    """找与当前 Playwright 驱动精确匹配的完整版 Chromium。"""
     root = playwright_root()
     if not root.is_dir():
         raise SystemExit("找不到 Playwright 浏览器目录：%s\n"
                          "先执行：python -m playwright install chromium" % root)
-    # 只要完整版；headless shell 是另一份，我们用 channel=chromium 统一走完整版
-    candidates = sorted(p for p in root.iterdir()
-                        if p.is_dir() and p.name.startswith("chromium-"))
-    if not candidates:
-        raise SystemExit("在 %s 下没找到 chromium-* 目录，"
-                         "先执行：python -m playwright install chromium" % root)
-    return candidates[-1]
+    # 不能简单挑目录名最大的版本：Playwright 驱动和浏览器必须成对，旧版目录
+    # 即使有 chrome.exe 也启动不了。headless shell 也不能代替完整版。
+    expected = root / ("chromium-" + expected_chromium_revision())
+    if not expected.is_dir():
+        raise SystemExit("当前 Playwright 需要 %s，但本机没有这个 Chromium。\n"
+                         "请执行：%s -m playwright install chromium"
+                         % (expected.name, sys.executable))
+    return expected
 
 
 def find_ffmpeg() -> Path:
@@ -100,6 +115,15 @@ def find_ffmpeg() -> Path:
         raise SystemExit("PATH 里找不到 ffmpeg.exe。装一个再来："
                          "winget install Gyan.FFmpeg")
     return Path(path)
+
+
+def find_ffprobe(ffmpeg: Path) -> Path:
+    """ffprobe 必须随包提供，字幕分段、分辨率和成品校验都依赖它。"""
+    sibling = ffmpeg.with_name("ffprobe.exe")
+    path = sibling if sibling.is_file() else Path(shutil.which("ffprobe") or "")
+    if not path.is_file():
+        raise SystemExit("PATH 里找不到 ffprobe.exe。请安装完整版 FFmpeg 后再打包。")
+    return path
 
 
 # --------------------------------------------------------------------------
@@ -113,7 +137,8 @@ def make_icon() -> Path:
                                QPainter, QPixmap)
     from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication([])
+    # 得留个引用：QApplication 被回收掉的话后面画图就崩了
+    _app = QApplication.instance() or QApplication([])
     BUILD.mkdir(parents=True, exist_ok=True)
     icon_path = BUILD / "icon.ico"
 
@@ -180,10 +205,10 @@ def ensure_unlocked() -> None:
     try:
         with exe.open("r+b"):
             pass
-    except OSError:
+    except OSError as exc:
         raise SystemExit(
             "%s 正被占用，无法覆盖。先关掉正在运行的 %s（任务管理器里也看一眼），"
-            "再重新打包。" % (exe, APP_NAME + ".exe"))
+            "再重新打包。" % (exe, APP_NAME + ".exe")) from exc
 
 
 def run_pyinstaller(icon: Path) -> Path:
@@ -210,8 +235,8 @@ def run_pyinstaller(icon: Path) -> Path:
     return exe
 
 
-def build_payload(chromium: Path, ffmpeg: Path) -> Path:
-    """把浏览器和 ffmpeg 压成一个 zip。"""
+def build_payload(chromium: Path, ffmpeg: Path, ffprobe: Path) -> Path:
+    """把浏览器、ffmpeg 和 ffprobe 压成一个 zip。"""
     payload = BUILD / "payload.zip"
     if payload.exists():
         payload.unlink()
@@ -220,6 +245,7 @@ def build_payload(chromium: Path, ffmpeg: Path) -> Path:
                                           p.relative_to(chromium).as_posix()))
              for p in chromium.rglob("*") if p.is_file()]
     files.append((ffmpeg, "bin/ffmpeg.exe"))
+    files.append((ffprobe, "bin/ffprobe.exe"))
     raw = sum(p.stat().st_size for p, _ in files)
     log("载荷共 %d 个文件、%s，正在压缩…" % (len(files), human(raw)))
 
@@ -271,9 +297,10 @@ def verify(exe: Path) -> None:
         raise SystemExit("载荷 zip 校验失败：%s" % bad)
     has_chrome = any(n.endswith("chrome.exe") for n in names)
     has_ffmpeg = "bin/ffmpeg.exe" in names
-    log("校验通过：%d 个条目，chrome.exe=%s ffmpeg.exe=%s"
-        % (len(names), has_chrome, has_ffmpeg))
-    if not (has_chrome and has_ffmpeg):
+    has_ffprobe = "bin/ffprobe.exe" in names
+    log("校验通过：%d 个条目，chrome.exe=%s ffmpeg.exe=%s ffprobe.exe=%s"
+        % (len(names), has_chrome, has_ffmpeg, has_ffprobe))
+    if not (has_chrome and has_ffmpeg and has_ffprobe):
         raise SystemExit("载荷内容不完整")
 
 
@@ -281,14 +308,16 @@ def main() -> int:
     log("项目目录 %s" % ROOT)
     chromium = find_chromium()
     ffmpeg = find_ffmpeg()
+    ffprobe = find_ffprobe(ffmpeg)
     log("Chromium: %s" % chromium)
     log("ffmpeg  : %s（%s）" % (ffmpeg, human(ffmpeg.stat().st_size)))
+    log("ffprobe : %s（%s）" % (ffprobe, human(ffprobe.stat().st_size)))
 
     icon = make_icon()
     log("图标：%s" % icon.name)
 
     exe = run_pyinstaller(icon)
-    payload = build_payload(chromium, ffmpeg)
+    payload = build_payload(chromium, ffmpeg, ffprobe)
     append_payload(exe, payload)
     verify(exe)
 

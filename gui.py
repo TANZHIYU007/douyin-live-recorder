@@ -34,7 +34,8 @@ def _on_uncaught(exc_type, exc, tb) -> None:
     sys.stderr.write(text) if sys.stderr else None
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
-        app = QApplication.instance() or QApplication([])
+        # 得留个引用：QApplication 被回收掉的话弹不出对话框
+        _app = QApplication.instance() or QApplication([])
         QMessageBox.critical(
             None, "拾光 出错了",
             "%s\n\n详细信息已写入：\n%s" % (str(exc) or exc_type.__name__, path or "（写入失败）"))
@@ -68,8 +69,27 @@ def _run_selftest() -> int:
     return 0 if ok else 1
 
 
+def _run_selftest_headless() -> int:
+    """无界面自检，供发布流水线验证打包成品。"""
+    from dylive import runtime
+    from dylive.selftest import run as check
+
+    try:
+        runtime.extract()
+        runtime.apply_env()
+        ok, text = check()
+    except Exception:                   # 和正常启动一样，把完整堆栈留在 crash.log
+        _on_uncaught(*sys.exc_info())
+        return 1
+    if sys.stdout:
+        print(text)
+    return 0 if ok else 1
+
+
 def main() -> int:
     sys.excepthook = _on_uncaught
+    if "--selftest-headless" in sys.argv:
+        return _run_selftest_headless()
     if "--selftest" in sys.argv:
         return _run_selftest()
     from dylive.ui.window import main as run

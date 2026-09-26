@@ -57,6 +57,8 @@ class VideoRecorder:
         self.out = self._out_path(out)
         self.proc: Optional[subprocess.Popen] = None
         self.started_at = 0.0
+        # ffmpeg 真的开始往盘上写的那一刻，见 note_first_data()
+        self.first_data_at = 0.0
         self._stderr_thread: Optional[threading.Thread] = None
 
     def _out_path(self, out: Path) -> Path:
@@ -126,6 +128,28 @@ class VideoRecorder:
     @property
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
+
+    def note_first_data(self) -> bool:
+        """确认 ffmpeg 已经真的在写文件了，并记下那一刻（只记一次）。
+
+        起录时刻不能用「Popen 返回」那一刻：ffmpeg 还要连 CDN、探测封装格式、
+        等第一个关键帧，实测通常要 1~3 秒。弹幕字幕的零点就是这里，差这几秒
+        整条字幕轨就整体偏了，而且偏多少还随网络状况变。
+        """
+        if self.first_data_at:
+            return True
+        for path in self.files():
+            try:
+                if path.stat().st_size > 0:
+                    self.first_data_at = time.time()
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def zero_at(self) -> float:
+        """这一路录制的时间零点。拿不到真实首帧时刻就退回启动时刻。"""
+        return self.first_data_at or self.started_at
 
     def stop(self, timeout: float = 15.0) -> None:
         """优雅停止：先请 ffmpeg 自己收尾，超时再强杀。"""

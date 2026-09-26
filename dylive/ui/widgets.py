@@ -424,8 +424,15 @@ class KindFilter(QSortFilterProxyModel):
         self.kinds: Optional[set] = None
 
     def set_kinds(self, kinds: Optional[Sequence[str]]) -> None:
-        self.kinds = set(kinds) if kinds is not None else None
-        self.invalidateFilter()
+        updated = set(kinds) if kinds is not None else None
+        # Qt 6.9 起用 begin/endFilterChange；旧版 PySide6 继续走兼容接口。
+        if hasattr(self, "beginFilterChange") and hasattr(self, "endFilterChange"):
+            self.beginFilterChange()
+            self.kinds = updated
+            self.endFilterChange(QSortFilterProxyModel.Direction.Rows)
+        else:
+            self.kinds = updated
+            self.invalidateRowsFilter()
 
     def filterAcceptsRow(self, row: int, parent: QModelIndex) -> bool:
         if self.kinds is None:

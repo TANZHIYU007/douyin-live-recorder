@@ -9,7 +9,7 @@
 和 Windows 版（build_exe.py）的两点区别：
 
 1. 不用「追加到可执行文件尾部」那套。.app 本身就是个目录，Chromium 和
-   ffmpeg 直接放进 Contents/Resources/runtime 就行，首次启动连解压都不用。
+   ffmpeg/ffprobe 直接放进 Contents/Resources/runtime 就行，首次启动连解压都不用。
    而且在 macOS 上给可执行文件屁股后面加字节会**破坏代码签名**，Apple 芯片
    上签名一坏就是启动即闪退（Killed: 9）。
 
@@ -61,9 +61,17 @@ def find_ffmpeg() -> Path:
     return path
 
 
+def find_ffprobe(ffmpeg: Path) -> Path:
+    sibling = ffmpeg.with_name("ffprobe")
+    path = sibling if sibling.is_file() else Path(shutil.which("ffprobe") or "")
+    if not path.is_file():
+        raise SystemExit("PATH 里找不到 ffprobe。请安装完整版 FFmpeg 后再打包。")
+    return path.resolve()
+
+
 def make_icns() -> Path:
     """用 Qt 画出图标再交给 iconutil 转成 icns。"""
-    from PySide6.QtCore import QBuffer, QByteArray, Qt
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import (QColor, QFont, QGuiApplication, QLinearGradient,
                                QPainter, QPixmap)
 
@@ -103,8 +111,8 @@ def make_icns() -> Path:
     return icns
 
 
-def stage_runtime(chromium: Path, ffmpeg: Path) -> Path:
-    """把浏览器和 ffmpeg 摆成 runtime/ 目录，整个塞进 .app 的 Resources。"""
+def stage_runtime(chromium: Path, ffmpeg: Path, ffprobe: Path) -> Path:
+    """把浏览器和媒体工具摆成 runtime/，整个塞进 .app 的 Resources。"""
     stage = BUILD / "runtime"
     if stage.exists():
         shutil.rmtree(stage)
@@ -114,7 +122,9 @@ def stage_runtime(chromium: Path, ffmpeg: Path) -> Path:
     log("拷贝 Chromium…（几百 MB，要一会儿）")
     shutil.copytree(chromium, target, symlinks=True)
     shutil.copy2(ffmpeg, stage / "bin" / "ffmpeg")
+    shutil.copy2(ffprobe, stage / "bin" / "ffprobe")
     os.chmod(stage / "bin" / "ffmpeg", 0o755)
+    os.chmod(stage / "bin" / "ffprobe", 0o755)
 
     size = sum(p.stat().st_size for p in stage.rglob("*") if p.is_file())
     log("运行时共 %s" % human(size))
@@ -199,6 +209,8 @@ def verify(app: Path) -> None:
     else:
         if not (runtime / "bin" / "ffmpeg").is_file():
             problems.append("runtime/bin/ffmpeg 不在")
+        if not (runtime / "bin" / "ffprobe").is_file():
+            problems.append("runtime/bin/ffprobe 不在")
         if not list((runtime / "ms-playwright").glob("chromium*")):
             problems.append("runtime/ms-playwright 下没有 chromium")
     if problems:
@@ -213,8 +225,9 @@ def main() -> int:
     BUILD.mkdir(exist_ok=True)
     chromium = find_chromium()
     ffmpeg = find_ffmpeg()
+    ffprobe = find_ffprobe(ffmpeg)
     icns = make_icns()
-    runtime = stage_runtime(chromium, ffmpeg)
+    runtime = stage_runtime(chromium, ffmpeg, ffprobe)
     app = run_pyinstaller(icns, runtime)
     patch_plist(app)
     sign(app)

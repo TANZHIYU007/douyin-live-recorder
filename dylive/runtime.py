@@ -3,7 +3,7 @@
 PyInstaller 单文件模式每次启动都会把打包内容解压到临时目录。Chromium 有几百个
 文件、四百多 MB，走这条路冷启动要几十秒，而且每次都往磁盘写一遍。
 
-所以 ffmpeg 和 Chromium 不进 PyInstaller 的归档，而是打成一个 zip **追加在 exe
+所以 ffmpeg、ffprobe 和 Chromium 不进 PyInstaller 的归档，而是打成一个 zip **追加在 exe
 尾部**：首次运行解压到用户目录，之后每次启动只要确认标记文件还在就直接复用。
 exe 依然是单个文件，冷启动只需要解压 Python 和 Qt 那部分。
 
@@ -29,6 +29,7 @@ FOOTER_LEN = len(MAGIC) + 8 + BUILD_ID_LEN
 # zip 内部的固定布局
 BROWSERS_DIR = "ms-playwright"
 FFMPEG_REL = "bin/ffmpeg" + paths.EXE_SUFFIX
+FFPROBE_REL = "bin/ffprobe" + paths.EXE_SUFFIX
 
 _STAMP = ".build_id"
 
@@ -41,7 +42,7 @@ def bundled_runtime() -> Optional[Path]:
     """随程序一起装好、不用解压的运行时目录，没有则 None。
 
     追加到可执行文件尾部那套是 Windows 单文件 exe 专用的。macOS 的 .app
-    本来就是个目录，把 Chromium 和 ffmpeg 放进 Contents/Resources/runtime
+    本来就是个目录，把 Chromium、ffmpeg 和 ffprobe 放进 Contents/Resources/runtime
     就行，连解压这一步都省了；而且在 macOS 上往可执行文件屁股后面加字节会
     **破坏代码签名**，Apple 芯片上签名一坏程序直接起不来。
     """
@@ -195,6 +196,14 @@ def bundled_ffmpeg() -> str:
     if not is_frozen():
         return ""
     path = runtime_dir() / FFMPEG_REL
+    return str(path) if path.is_file() else ""
+
+
+def bundled_ffprobe() -> str:
+    """内置 ffprobe 的路径，没有就返回空串。"""
+    if not is_frozen():
+        return ""
+    path = runtime_dir() / FFPROBE_REL
     return str(path) if path.is_file() else ""
 
 

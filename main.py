@@ -17,7 +17,7 @@ import signal
 import sys
 from pathlib import Path
 
-from dylive import room
+from dylive import room, subtitle
 from dylive.messages import DEFAULT_KINDS, KIND_BY_METHOD
 from dylive.recorder import Options, Recorder
 from dylive.utils import setup_console, setup_logging
@@ -70,6 +70,23 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Chromium 用户目录，用来保留登录态")
     g.add_argument("--cookie", default="", help="自定义 Cookie 字符串")
     g.add_argument("--proxy", default="", help="代理，如 http://127.0.0.1:7890")
+
+    g = p.add_argument_group("弹幕字幕")
+    g.add_argument("--embed", action="store_true",
+                   help="录完把弹幕做成 ASS 并作为软字幕封进视频（输出 mkv，不重编码）")
+    g.add_argument("--keep-original", action="store_true",
+                   help="配合 --embed：封装成功后保留原始视频，默认校验通过就删掉")
+    g.add_argument("--subtitle-style", choices=[subtitle.CHAT, subtitle.SCROLL],
+                   default=subtitle.CHAT,
+                   help="chat 左下角聊天流（默认，像直播间）/ scroll 滚动弹幕")
+    g.add_argument("--subtitle-size", type=int, default=48, help="字幕字号（默认 48）")
+    g.add_argument("--subtitle-duration", type=float, default=10.0, metavar="秒",
+                   help="滚动：横穿屏幕的秒数；聊天流：一条最多停留多久（默认 10）")
+    g.add_argument("--subtitle-reserve", type=float, default=0.4,
+                   help="滚动样式：屏幕下方留白比例，避免挡住主播（默认 0.4）")
+    g.add_argument("--danmaku-delay", type=float, default=0.0, metavar="秒",
+                   help="弹幕整体往后推的秒数，抵掉直播流比弹幕慢的那几秒。"
+                        "字幕比画面早就调大，晚了填负数（默认 0）")
 
     g = p.add_argument_group("守候与重试")
     g.add_argument("-w", "--watch", action="store_true",
@@ -138,6 +155,13 @@ def main(argv: list[str] | None = None) -> int:
         poll_interval=args.poll,
         check_interval=args.check,
         retry_delay=args.retry,
+        embed_subtitle=args.embed,
+        subtitle_replace=not args.keep_original,
+        subtitle_style=args.subtitle_style,
+        subtitle_size=args.subtitle_size,
+        subtitle_duration=args.subtitle_duration,
+        subtitle_reserve=args.subtitle_reserve,
+        subtitle_delay=args.danmaku_delay,
     )
 
     try:

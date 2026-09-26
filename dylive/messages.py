@@ -51,6 +51,9 @@ KIND_BY_METHOD = {
 # 默认只落盘这几类，其余用 --kinds 打开
 DEFAULT_KINDS = ("chat", "emoji", "gift", "social", "member", "control")
 
+# 这几类消息的价值全在数值上，本来就没有文本，不能按「空消息」丢掉
+VALUE_ONLY_KINDS = ("user_seq", "stats")
+
 
 @dataclass
 class Event:
@@ -224,7 +227,10 @@ def build_event(method: str, payload: bytes, ts: float, start: float) -> Optiona
     elif kind == "room_notice":
         ev.content = proto.s(proto.sub(f, 6), 2) or describe
 
-    if not ev.content and not ev.user_name:
+    # 没内容也没用户名的多半是残帧，丢掉。但统计类消息的值全在 extra 里
+    # （在线人数、点赞总数），它们本来就没有文本 —— 一起丢掉的话，用户在
+    # 设置里勾了「在线人数」会一条都收不到。
+    if not ev.content and not ev.user_name and kind not in VALUE_ONLY_KINDS:
         return None
     return ev
 

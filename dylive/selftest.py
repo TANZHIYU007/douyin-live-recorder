@@ -37,7 +37,7 @@ def _check_runtime() -> Tuple[bool, str]:
 
 
 def _check_ffmpeg() -> Tuple[bool, str]:
-    from . import video
+    from . import subtitle, video
     try:
         path = video.find_ffmpeg()
     except RuntimeError as exc:
@@ -48,7 +48,19 @@ def _check_ffmpeg() -> Tuple[bool, str]:
     except (OSError, subprocess.SubprocessError) as exc:
         return False, "%s 无法执行：%s" % (path, exc)
     first = out.stdout.decode("utf-8", "replace").splitlines()
-    return out.returncode == 0, (first[0] if first else "无输出") + "\n    " + path
+    if out.returncode != 0:
+        return False, (first[0] if first else "ffmpeg 无输出") + "\n    " + path
+
+    ffprobe = subtitle.find_ffprobe(path)
+    try:
+        probe = subprocess.run([ffprobe, "-version"], capture_output=True, timeout=20,
+                               **video.NO_WINDOW)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "ffmpeg 正常，但 ffprobe 无法执行：%s" % exc
+    if probe.returncode != 0:
+        return False, "ffmpeg 正常，但 ffprobe 退出码为 %s" % probe.returncode
+    return True, "%s\n    ffmpeg: %s\n    ffprobe: %s" % (
+        first[0] if first else "ffmpeg 正常", path, ffprobe)
 
 
 def _check_browser() -> Tuple[bool, str]:
