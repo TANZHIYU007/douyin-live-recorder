@@ -78,6 +78,9 @@ jobs:
   package-smoke:
     name: Windows 成品启动
     runs-on: windows-latest
+    env:
+      # GitHub 的英文 Windows 镜像默认 stdout 是 cp1252，构建日志含中文。
+      PYTHONUTF8: "1"
 
     steps:
       - uses: actions/checkout@v4
