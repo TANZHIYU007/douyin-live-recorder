@@ -93,7 +93,7 @@ jobs:
       - name: 装打包依赖
         run: |
           python -m pip install --upgrade pip
-          pip install ".[all]" pyinstaller
+          pip install ".[browser,gui]" pyinstaller
 
       - name: 构建并真实启动 Qt 界面
         run: python build_exe.py --qt-smoke-only
