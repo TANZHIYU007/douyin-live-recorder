@@ -88,12 +88,18 @@ def _run_selftest_headless() -> int:
 
 def main() -> int:
     sys.excepthook = _on_uncaught
-    if "--selftest-headless" in sys.argv:
-        return _run_selftest_headless()
-    if "--selftest" in sys.argv:
-        return _run_selftest()
-    from dylive.ui.window import main as run
-    return run()
+    try:
+        if "--selftest-headless" in sys.argv:
+            return _run_selftest_headless()
+        if "--selftest" in sys.argv:
+            return _run_selftest()
+        # --smoke-test-gui 刻意继续走正常启动路径，由 window.main 在界面真正
+        # 创建并处理过事件后自动退出。这样能抓到 Qt DLL/平台插件等成品问题。
+        from dylive.ui.window import main as run
+        return run()
+    except Exception:                   # 打包版别再弹 PyInstaller 的英文裸异常框
+        _on_uncaught(*sys.exc_info())
+        return 1
 
 
 if __name__ == "__main__":

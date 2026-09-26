@@ -19,14 +19,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
@@ -62,6 +64,76 @@ def log(msg: str) -> None:
 
 def human(num: float) -> str:
     return "%.1f MB" % (num / 1048576) if num < 1 << 30 else "%.2f GB" % (num / (1 << 30))
+
+
+def _is_below(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def sanitized_build_path(path_value: str, system_root: Path) -> tuple[str, list[str]]:
+    """把会劫持 Qt 系统 ICU 的第三方目录从打包 PATH 中拿掉。
+
+    Qt6Core 在 Windows 上依赖系统的 ``icuuc.dll``。如果打包机 PATH 里另有
+    Poppler/Conda 等自带的同名 DLL，PyInstaller 会误把它连同其私有 ICU 数据
+    一起塞进 exe。运行时这个副本优先于 System32，QtCore 随即导入失败。
+    """
+    kept: list[str] = []
+    removed: list[str] = []
+    for raw in path_value.split(os.pathsep):
+        if not raw:
+            continue
+        candidate = Path(raw.strip('"'))
+        if ((candidate / "icuuc.dll").is_file()
+                and not _is_below(candidate, system_root)):
+            removed.append(raw)
+            continue
+        kept.append(raw)
+    return os.pathsep.join(kept), removed
+
+
+def pyinstaller_env() -> dict[str, str]:
+    """给 PyInstaller 一份不受开发工具私有 DLL 污染的环境。"""
+    env = os.environ.copy()
+    if sys.platform != "win32":
+        return env
+    system_root = Path(env.get("SystemRoot") or env.get("WINDIR") or r"C:\Windows")
+    env["PATH"], removed = sanitized_build_path(env.get("PATH", ""), system_root)
+    for item in removed:
+        log("打包 PATH 已排除第三方 ICU 目录：%s" % item)
+    return env
+
+
+_ROOT_ICU = re.compile(r"icu(?:dt|in|io|test|tu|uc)\d*\.dll", re.IGNORECASE)
+
+
+def unexpected_root_icu(names) -> list[str]:
+    """返回被错误打进 PyInstaller 根目录的 ICU DLL。"""
+    return sorted(
+        name for name in names
+        if PureWindowsPath(name).parent == PureWindowsPath(".")
+        and _ROOT_ICU.fullmatch(PureWindowsPath(name).name)
+    )
+
+
+def verify_pyinstaller_archive(exe: Path) -> None:
+    """在追加浏览器载荷前检查 Qt 归档，阻止已知坏包流出。"""
+    from PyInstaller.archive.readers import CArchiveReader
+
+    names = list(CArchiveReader(str(exe)).toc)
+    required = {"PySide6\\QtCore.pyd", "PySide6\\Qt6Core.dll"}
+    missing = sorted(required.difference(names))
+    if missing:
+        raise SystemExit("PyInstaller 产物缺少 Qt 核心文件：%s" % ", ".join(missing))
+    bad = unexpected_root_icu(names)
+    if bad:
+        raise SystemExit(
+            "PyInstaller 错误收进了第三方 ICU DLL：%s。请检查打包 PATH。"
+            % ", ".join(bad))
+    log("Qt 归档校验通过：QtCore 完整，未混入第三方 ICU")
 
 
 # --------------------------------------------------------------------------
@@ -224,7 +296,7 @@ def run_pyinstaller(icon: Path) -> Path:
     cmd.append(str(ROOT / "gui.py"))
 
     log("运行 PyInstaller…（几分钟）")
-    proc = subprocess.run(cmd, cwd=str(ROOT))
+    proc = subprocess.run(cmd, cwd=str(ROOT), env=pyinstaller_env())
     if proc.returncode != 0:
         raise SystemExit("PyInstaller 失败，退出码 %d" % proc.returncode)
 
@@ -232,6 +304,7 @@ def run_pyinstaller(icon: Path) -> Path:
     if not exe.is_file():
         raise SystemExit("没找到产物 %s" % exe)
     log("PyInstaller 产物：%s" % human(exe.stat().st_size))
+    verify_pyinstaller_archive(exe)
     return exe
 
 
@@ -304,8 +377,40 @@ def verify(exe: Path) -> None:
         raise SystemExit("载荷内容不完整")
 
 
+def smoke_test(exe: Path, full: bool = True) -> None:
+    """按用户实际启动路径验证 Qt 界面；完整包再检查所有内置工具。"""
+    with tempfile.TemporaryDirectory(prefix="lumina-build-smoke-") as tmp:
+        env = os.environ.copy()
+        env["LOCALAPPDATA"] = tmp
+        env["APPDATA"] = str(Path(tmp) / "Roaming")
+        checks = [("Qt 界面启动", [str(exe), "--smoke-test-gui"], 180)]
+        if full:
+            checks.append(
+                ("完整运行环境", [str(exe), "--selftest-headless"], 240))
+        for label, cmd, timeout in checks:
+            log("成品自检：%s…" % label)
+            try:
+                proc = subprocess.run(cmd, env=env, timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                raise SystemExit("成品自检超时（%s）" % label) from exc
+            if proc.returncode != 0:
+                crash = Path(tmp) / "Lumina" / "crash.log"
+                detail = ""
+                if crash.is_file():
+                    detail = "\n" + crash.read_text(encoding="utf-8", errors="replace")[-4000:]
+                raise SystemExit("成品自检失败（%s），退出码 %d%s"
+                                 % (label, proc.returncode, detail))
+        log("成品自检全部通过")
+
+
 def main() -> int:
     log("项目目录 %s" % ROOT)
+    if "--qt-smoke-only" in sys.argv:
+        log("CI 快速模式：只构建 PyInstaller 主程序并验证 Qt 界面启动")
+        exe = run_pyinstaller(make_icon())
+        smoke_test(exe, full=False)
+        return 0
+
     chromium = find_chromium()
     ffmpeg = find_ffmpeg()
     ffprobe = find_ffprobe(ffmpeg)
@@ -320,6 +425,7 @@ def main() -> int:
     payload = build_payload(chromium, ffmpeg, ffprobe)
     append_payload(exe, payload)
     verify(exe)
+    smoke_test(exe)
 
     log("=" * 56)
     log("完成：%s" % exe)

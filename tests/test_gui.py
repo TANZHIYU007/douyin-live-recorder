@@ -20,3 +20,15 @@ def test_headless_自检失败时返回非零(monkeypatch):
     monkeypatch.setattr(selftest, "run", lambda: (False, "存在问题"))
 
     assert gui._run_selftest_headless() == 1
+
+
+def test_正常启动异常会转成非零退出码(monkeypatch):
+    seen = []
+    monkeypatch.setattr(gui, "_on_uncaught",
+                        lambda *info: seen.append(info[1]))
+
+    # 模拟正常启动路径在导入 Qt 界面时失败。
+    monkeypatch.setitem(__import__("sys").modules, "dylive.ui.window", None)
+
+    assert gui.main() == 1
+    assert seen

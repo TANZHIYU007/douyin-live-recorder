@@ -1118,7 +1118,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                         force=True)
     quiet_noisy_loggers()
 
-    app = QApplication(argv if argv is not None else sys.argv)
+    args = list(argv if argv is not None else sys.argv)
+    smoke_test = "--smoke-test-gui" in args
+    args = [arg for arg in args if arg != "--smoke-test-gui"]
+    app = QApplication(args)
     app.setApplicationName(APP_NAME)
 
     saved = AppSettings.load()
@@ -1140,4 +1143,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # 退出统一由 closeEvent 末尾显式发起
     app.setQuitOnLastWindowClosed(not window.tray.available)
     window.show()
+    if smoke_test:
+        # 不是只 import：窗口需真正显示、进入事件循环再关闭，尽量贴近双击启动。
+        QTimer.singleShot(500, window._quit_from_tray)
     return app.exec()
