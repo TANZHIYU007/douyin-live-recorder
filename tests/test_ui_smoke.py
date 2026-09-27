@@ -1,5 +1,9 @@
 """主窗口的人机交互冒烟测试。"""
 
+import pytest
+
+pytest.importorskip("PySide6")
+
 from dylive.ui import smoke
 from dylive.ui.settings import AppSettings
 from dylive.ui.window import MainWindow, fit_window_dimensions

@@ -13,8 +13,8 @@ def _fake_frozen_exe(tmp_path, monkeypatch):
     payload = io.BytesIO()
     with zipfile.ZipFile(payload, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("ms-playwright/chromium-123/chrome-win64/chrome.exe", b"chrome")
-        zf.writestr("bin/ffmpeg.exe", b"ffmpeg")
-        zf.writestr("bin/ffprobe.exe", b"ffprobe")
+        zf.writestr(runtime.FFMPEG_REL, b"ffmpeg")
+        zf.writestr(runtime.FFPROBE_REL, b"ffprobe")
         for index in range(40):
             zf.writestr("data/%03d.txt" % index, b"x" * 1024)
 
@@ -46,7 +46,7 @@ def test_解压完整后再次调用直接复用(tmp_path, monkeypatch):
 def test_运行时文件损坏会自动重新解压(tmp_path, monkeypatch):
     app_dir = _fake_frozen_exe(tmp_path, monkeypatch)
     runtime.extract()
-    ffmpeg = app_dir / "runtime" / "bin" / "ffmpeg.exe"
+    ffmpeg = app_dir / "runtime" / runtime.FFMPEG_REL
     ffmpeg.unlink()
 
     assert not runtime.is_ready()
