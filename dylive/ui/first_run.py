@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QProgressBar,
 
 from .. import runtime
 from . import theme
+from .icons import app_pixmap
 
 
 class _Reporter(QObject):
@@ -45,10 +46,11 @@ class FirstRunDialog(QDialog):
 
         head = QHBoxLayout()
         head.setSpacing(12)
-        mark = QLabel("拾")
-        mark.setObjectName("brandMark")
-        mark.setFixedSize(38, 38)
+        mark = QLabel()
+        mark.setObjectName("brandIcon")
+        mark.setFixedSize(42, 42)
         mark.setAlignment(Qt.AlignCenter)
+        mark.setPixmap(app_pixmap(42))
         head.addWidget(mark)
 
         title_col = QVBoxLayout()

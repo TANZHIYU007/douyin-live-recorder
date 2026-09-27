@@ -202,9 +202,8 @@ class BrowserHub:
 
     def _launch(self, pw):
         args = {
-            # 钉住完整版 Chromium：新版 Playwright 的 headless 默认会去找单独的
-            # headless shell，而打包时只带了完整版这一份
-            "channel": "chromium",
+            # 完整版钉住内置 Chromium；轻量版自动复用系统 Edge/Chrome。
+            "channel": runtime.browser_channel(),
             "headless": self.headless,
             "args": ["--mute-audio", "--disable-blink-features=AutomationControlled",
                      "--autoplay-policy=no-user-gesture-required"],

@@ -16,51 +16,19 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap
+from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
-from .. import paths
+from .icons import status_icon
 
 log = logging.getLogger("tray")
-
-# 和 build_exe.make_icon() 画的是同一个标记，托盘和任务栏才像一套东西
-ACCENT_FROM = "#FE2C55"
-ACCENT_TO = "#7B2FF7"
-IDLE_FROM = "#8A93A0"
-IDLE_TO = "#5D6672"
 
 NOTIFY_MS = 6000
 
 
 def make_icon(active: bool) -> QIcon:
-    """画托盘图标。active=在录（红），否则灰。
-
-    多给几个尺寸：Windows 任务栏和 macOS 菜单栏要的不一样，只给一个的话
-    缩放出来是糊的。
-    """
-    icon = QIcon()
-    for size in (16, 20, 24, 32, 48):
-        pix = QPixmap(size, size)
-        pix.fill(Qt.transparent)
-        painter = QPainter(pix)
-        painter.setRenderHint(QPainter.Antialiasing)
-
-        grad = QLinearGradient(0, 0, size, size)
-        grad.setColorAt(0.0, QColor(ACCENT_FROM if active else IDLE_FROM))
-        grad.setColorAt(1.0, QColor(ACCENT_TO if active else IDLE_TO))
-        painter.setBrush(QBrush(grad))
-        painter.setPen(Qt.NoPen)
-        painter.drawRoundedRect(QRectF(0, 0, size, size), size * 0.24, size * 0.24)
-
-        font = QFont(paths.ui_font(), max(6, int(size * 0.46)))
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(QColor("#FFFFFF"))
-        painter.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, "拾")
-        painter.end()
-        icon.addPixmap(pix)
-    return icon
+    """品牌图标右下角加状态点：红色在录，灰色待命。"""
+    return status_icon(active)
 
 
 class Tray:

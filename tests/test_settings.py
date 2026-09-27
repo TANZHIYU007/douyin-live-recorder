@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 
 import pytest
 
@@ -54,6 +55,40 @@ def test_配置坏掉时不崩但会退回默认值(conf):
     assert s.rooms == []
 
 
+@pytest.mark.parametrize("content", ["null", "[]", '"不是对象"'])
+def test_合法_json_但不是配置对象时退回默认值(conf, content):
+    conf.write_text(content, encoding="utf-8")
+    assert AppSettings.load().rooms == []
+
+
+def test_错误类型字段被忽略而有效字段保留(conf):
+    conf.write_text(json.dumps({
+        "rooms": "不应该是字符串",
+        "segment_minutes": "会让 Qt 崩溃",
+        "subtitle_duration": 8,
+        "quality": "HD1",
+    }), encoding="utf-8")
+
+    settings = AppSettings.load()
+    assert settings.rooms == []
+    assert settings.segment_minutes == 0
+    assert settings.subtitle_duration == 8.0
+    assert settings.quality == "HD1"
+
+
+def test_保存中断不会破坏原配置(conf, monkeypatch):
+    original = AppSettings(rooms=["123"])
+    original.save()
+    before = conf.read_bytes()
+
+    monkeypatch.setattr(os, "replace",
+                        lambda *_: (_ for _ in ()).throw(OSError("模拟断电")))
+    AppSettings(rooms=["456"]).save()
+
+    assert conf.read_bytes() == before
+    assert not list(conf.parent.glob("config.json.*.tmp"))
+
+
 def test_延迟补偿默认不开():
     """默认 0 —— 不同网络环境下的拉流延迟不一样，不能替用户拍板。"""
     assert AppSettings().subtitle_delay == 0.0
@@ -71,6 +106,32 @@ def test_设置对话框能建起来且带上延迟补偿(qapp):
     dialog.sub_delay.setValue(6.0)
     dialog.apply_to(s)
     assert s.subtitle_delay == 6.0
+
+
+def test_主题设置统一放在设置对话框(qapp):
+    from dylive.ui.settings import SettingsDialog
+
+    settings = AppSettings(theme="light")
+    dialog = SettingsDialog(settings)
+    dialog.theme_mode.setCurrentIndex(1)
+    dialog.apply_to(settings)
+
+    assert settings.theme == "dark"
+    assert dialog.environment_check.text() == "立即检查"
+
+
+def test_环境检查结果会回写设置页面(qapp, monkeypatch):
+    from dylive.ui import settings as settings_mod
+
+    shown = []
+    monkeypatch.setattr(settings_mod.QMessageBox, "information",
+                        lambda *args: shown.append(args[-1]))
+    dialog = settings_mod.SettingsDialog(AppSettings())
+    dialog._environment_checked(True, "四项全部通过")
+
+    assert "正常" in dialog.environment_status.text()
+    assert dialog.environment_check.text() == "重新检查"
+    assert shown == ["四项全部通过"]
 
 
 def test_关掉自动封装时延迟补偿一起变灰(qapp):

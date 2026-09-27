@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lumina-dylive"
-version = "1.2.0"
+version = "1.2.1"
 description = "拾光 Lumina —— 抖音直播录制：画面无损、弹幕结构化，还能把弹幕封成字幕轨"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,6 +25,9 @@ lumina = "main:main"
 [tool.setuptools]
 packages = ["dylive", "dylive.ui"]
 py-modules = ["main"]
+
+[tool.setuptools.package-data]
+"dylive.ui" = ["assets/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

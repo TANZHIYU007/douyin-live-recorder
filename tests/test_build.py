@@ -43,3 +43,58 @@ def test_windows_载荷包含_ffmpeg_和_ffprobe(tmp_path, monkeypatch):
     assert "bin/ffmpeg.exe" in names
     assert "bin/ffprobe.exe" in names
     assert any(name.endswith("chrome.exe") for name in names)
+
+
+def test_共享版_dll_进入载荷但_ffplay_不会进入(tmp_path, monkeypatch):
+    chromium = tmp_path / "chromium-1"
+    chromium.mkdir()
+    (chromium / "chrome.exe").write_bytes(b"chrome")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ffmpeg = bin_dir / "ffmpeg.exe"
+    ffprobe = bin_dir / "ffprobe.exe"
+    for path in (ffmpeg, ffprobe, bin_dir / "avcodec-63.dll",
+                 bin_dir / "avformat-63.dll", bin_dir / "ffplay.exe"):
+        path.write_bytes(path.name.encode())
+    build = tmp_path / "build"
+    build.mkdir()
+    monkeypatch.setattr(build_exe, "BUILD", build)
+
+    payload = build_exe.build_payload(chromium, ffmpeg, ffprobe)
+    with zipfile.ZipFile(payload) as zf:
+        names = set(zf.namelist())
+
+    assert "bin/avcodec-63.dll" in names
+    assert "bin/avformat-63.dll" in names
+    assert "bin/ffplay.exe" not in names
+
+
+def test_打包_path_排除第三方_icu_但保留系统目录(tmp_path):
+    windows = tmp_path / "Windows"
+    system32 = windows / "System32"
+    poppler = tmp_path / "poppler" / "bin"
+    normal = tmp_path / "normal"
+    for folder in (system32, poppler, normal):
+        folder.mkdir(parents=True)
+    (system32 / "icuuc.dll").write_bytes(b"system")
+    (poppler / "icuuc.dll").write_bytes(b"third-party")
+
+    value = build_exe.os.pathsep.join(map(str, (poppler, system32, normal)))
+    cleaned, removed = build_exe.sanitized_build_path(value, windows)
+
+    assert str(poppler) not in cleaned.split(build_exe.os.pathsep)
+    assert str(system32) in cleaned.split(build_exe.os.pathsep)
+    assert str(normal) in cleaned.split(build_exe.os.pathsep)
+    assert removed == [str(poppler)]
+
+
+def test_归档检查识别根目录_icu_污染():
+    names = [
+        "PySide6\\QtCore.pyd",
+        "PySide6\\Qt6Core.dll",
+        "icuuc.dll",
+        "icudt78.dll",
+        "somewhere\\icuuc.dll",
+    ]
+
+    assert build_exe.unexpected_root_icu(names) == ["icudt78.dll", "icuuc.dll"]

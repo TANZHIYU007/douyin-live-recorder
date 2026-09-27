@@ -25,6 +25,18 @@ NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if WINDOWS else {}
 EXE_SUFFIX = ".exe" if WINDOWS else ""
 
 
+def set_app_identity() -> None:
+    """让 Windows 任务栏按拾光自己的身份和图标分组。"""
+    if not WINDOWS:
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(  # type: ignore[attr-defined]
+            "TANZHIYU007.Lumina")
+    except (AttributeError, OSError):
+        pass
+
+
 def app_data_dir() -> Path:
     """配置、日志、解压出来的运行时都放这儿，各平台按各自的规矩来。"""
     if WINDOWS:
