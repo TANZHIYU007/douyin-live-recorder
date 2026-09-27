@@ -30,10 +30,13 @@ import uuid
 import zipfile
 from pathlib import Path, PureWindowsPath
 
+from dylive import __version__
+
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 APP_NAME = "Lumina"
+APP_VERSION = __version__
 
 MAGIC = b"DYLIVEPAYLOAD001"
 
@@ -47,7 +50,7 @@ QT_EXCLUDES = [
     "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtSpatialAudio",
     "PySide6.QtBluetooth", "PySide6.QtNfc", "PySide6.QtPositioning",
     "PySide6.QtLocation", "PySide6.QtSensors", "PySide6.QtSerialPort",
-    "PySide6.QtSerialBus", "PySide6.QtSql", "PySide6.QtTest", "PySide6.QtDesigner",
+    "PySide6.QtSerialBus", "PySide6.QtSql", "PySide6.QtDesigner",
     "PySide6.QtHelp", "PySide6.QtUiTools", "PySide6.QtNetworkAuth",
     "PySide6.QtRemoteObjects", "PySide6.QtScxml", "PySide6.QtStateMachine",
     "PySide6.QtPdf", "PySide6.QtPdfWidgets", "PySide6.QtTextToSpeech",
@@ -182,7 +185,8 @@ def find_chromium() -> Path:
 
 
 def find_ffmpeg() -> Path:
-    path = shutil.which("ffmpeg")
+    override = os.environ.get("LUMINA_FFMPEG_DIR", "")
+    path = str(Path(override) / "ffmpeg.exe") if override else shutil.which("ffmpeg")
     if not path:
         raise SystemExit("PATH 里找不到 ffmpeg.exe。装一个再来："
                          "winget install Gyan.FFmpeg")
@@ -198,45 +202,62 @@ def find_ffprobe(ffmpeg: Path) -> Path:
     return path
 
 
+def ffmpeg_bundle_files(ffmpeg: Path, ffprobe: Path) -> list[Path]:
+    """共享版把公共编解码器放在 DLL 中；静态版则仍只有两个 exe。"""
+    dlls = sorted(ffmpeg.parent.glob("*.dll"))
+    return [ffmpeg, ffprobe, *dlls]
+
+
 # --------------------------------------------------------------------------
 # 图标
 # --------------------------------------------------------------------------
 
 def make_icon() -> Path:
-    """画一个和界面里 logo 一致的圆角渐变图标。"""
-    from PySide6.QtCore import QRectF, Qt
-    from PySide6.QtGui import (QBrush, QColor, QFont, QLinearGradient,
-                               QPainter, QPixmap)
+    """从品牌源图生成 Windows 多尺寸 ICO。"""
     from PySide6.QtWidgets import QApplication
+
+    from dylive.ui.icons import ICON_SIZES, app_pixmap
 
     # 得留个引用：QApplication 被回收掉的话后面画图就崩了
     _app = QApplication.instance() or QApplication([])
     BUILD.mkdir(parents=True, exist_ok=True)
     icon_path = BUILD / "icon.ico"
 
-    pixmaps = []
-    for size in (16, 24, 32, 48, 64, 128, 256):
-        pix = QPixmap(size, size)
-        pix.fill(Qt.transparent)
-        painter = QPainter(pix)
-        painter.setRenderHint(QPainter.Antialiasing)
-        grad = QLinearGradient(0, 0, size, size)
-        grad.setColorAt(0.0, QColor("#FE2C55"))
-        grad.setColorAt(1.0, QColor("#7B2FF7"))
-        painter.setBrush(QBrush(grad))
-        painter.setPen(Qt.NoPen)
-        painter.drawRoundedRect(QRectF(0, 0, size, size), size * 0.24, size * 0.24)
-
-        font = QFont("Microsoft YaHei UI", int(size * 0.46))
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(QColor("#FFFFFF"))
-        painter.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, "拾")
-        painter.end()
-        pixmaps.append(pix)
+    pixmaps = [app_pixmap(size) for size in ICON_SIZES if size != 20 and size != 40]
 
     _write_ico(icon_path, pixmaps)
     return icon_path
+
+
+def make_version_file() -> Path:
+    """生成 Windows 资源版本信息，让属性页能认出产品与版本。"""
+    parts = [int(part) for part in APP_VERSION.split(".")]
+    numbers = tuple((parts + [0, 0, 0, 0])[:4])
+    version_file = BUILD / "version_info.txt"
+    version_file.write_text(
+        """VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=%r,
+    prodvers=%r,
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)),
+  kids=[
+    StringFileInfo([
+      StringTable('080404B0', [
+        StringStruct('FileDescription', '拾光 Lumina 抖音直播录制'),
+        StringStruct('FileVersion', '%s'),
+        StringStruct('InternalName', 'Lumina'),
+        StringStruct('OriginalFilename', 'Lumina.exe'),
+        StringStruct('ProductName', '拾光 Lumina'),
+        StringStruct('ProductVersion', '%s')])]),
+    VarFileInfo([VarStruct('Translation', [2052, 1200])])])
+""" % (numbers, numbers, APP_VERSION, APP_VERSION),
+        encoding="utf-8")
+    return version_file
 
 
 def _write_ico(ico: Path, pixmaps) -> None:
@@ -269,9 +290,8 @@ def _write_ico(ico: Path, pixmaps) -> None:
 # 构建
 # --------------------------------------------------------------------------
 
-def ensure_unlocked() -> None:
+def ensure_unlocked(exe: Path) -> None:
     """exe 还在跑的话 PyInstaller 会以「拒绝访问」失败，提前说清楚。"""
-    exe = DIST / (APP_NAME + ".exe")
     if not exe.exists():
         return
     try:
@@ -283,11 +303,15 @@ def ensure_unlocked() -> None:
             "再重新打包。" % (exe, APP_NAME + ".exe")) from exc
 
 
-def run_pyinstaller(icon: Path) -> Path:
-    ensure_unlocked()
+def run_pyinstaller(icon: Path, version_file: Path, output_name: str) -> Path:
+    exe = DIST / (output_name + ".exe")
+    ensure_unlocked(exe)
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
-           "--onefile", "--windowed", "--name", APP_NAME,
+           "--onefile", "--windowed", "--name", output_name,
            "--icon", str(icon),
+           "--version-file", str(version_file),
+           "--add-data", str(ROOT / "dylive" / "ui" / "assets" / "lumina-icon-v2.png")
+                         + os.pathsep + "dylive/ui/assets",
            "--collect-data", "playwright",
            "--collect-binaries", "playwright",
            "--hidden-import", "dylive.ui.window"]
@@ -300,7 +324,6 @@ def run_pyinstaller(icon: Path) -> Path:
     if proc.returncode != 0:
         raise SystemExit("PyInstaller 失败，退出码 %d" % proc.returncode)
 
-    exe = DIST / (APP_NAME + ".exe")
     if not exe.is_file():
         raise SystemExit("没找到产物 %s" % exe)
     log("PyInstaller 产物：%s" % human(exe.stat().st_size))
@@ -317,8 +340,8 @@ def build_payload(chromium: Path, ffmpeg: Path, ffprobe: Path) -> Path:
     files = [(p, "ms-playwright/%s/%s" % (chromium.name,
                                           p.relative_to(chromium).as_posix()))
              for p in chromium.rglob("*") if p.is_file()]
-    files.append((ffmpeg, "bin/ffmpeg.exe"))
-    files.append((ffprobe, "bin/ffprobe.exe"))
+    for binary in ffmpeg_bundle_files(ffmpeg, ffprobe):
+        files.append((binary, "bin/" + binary.name))
     raw = sum(p.stat().st_size for p, _ in files)
     log("载荷共 %d 个文件、%s，正在压缩…" % (len(files), human(raw)))
 
@@ -383,6 +406,8 @@ def smoke_test(exe: Path, full: bool = True) -> None:
         env = os.environ.copy()
         env["LOCALAPPDATA"] = tmp
         env["APPDATA"] = str(Path(tmp) / "Roaming")
+        gui_report = Path(tmp) / "gui-smoke.txt"
+        env["LUMINA_GUI_SMOKE_REPORT"] = str(gui_report)
         checks = [("Qt 界面启动", [str(exe), "--smoke-test-gui"], 180)]
         if full:
             checks.append(
@@ -396,19 +421,37 @@ def smoke_test(exe: Path, full: bool = True) -> None:
             if proc.returncode != 0:
                 crash = Path(tmp) / "Lumina" / "crash.log"
                 detail = ""
+                if label == "Qt 界面启动" and gui_report.is_file():
+                    detail += "\nQt 交互报告：\n" + gui_report.read_text(
+                        encoding="utf-8", errors="replace")[-4000:]
                 if crash.is_file():
-                    detail = "\n" + crash.read_text(encoding="utf-8", errors="replace")[-4000:]
+                    detail += "\n崩溃日志：\n" + crash.read_text(
+                        encoding="utf-8", errors="replace")[-4000:]
                 raise SystemExit("成品自检失败（%s），退出码 %d%s"
                                  % (label, proc.returncode, detail))
+            if label == "Qt 界面启动":
+                if not gui_report.is_file():
+                    raise SystemExit("成品自检失败：Qt 交互报告没有生成")
+                log("Qt 交互报告：\n" + gui_report.read_text(encoding="utf-8").rstrip())
         log("成品自检全部通过")
 
 
 def main() -> int:
     log("项目目录 %s" % ROOT)
+    icon = make_icon()
+    version_file = make_version_file()
+    lite = DIST / (APP_NAME + "-Lite.exe")
+    if "--full-only" in sys.argv and lite.is_file():
+        log("复用已验证的轻量版主程序：%s" % lite)
+        verify_pyinstaller_archive(lite)
+    else:
+        lite = run_pyinstaller(icon, version_file, APP_NAME + "-Lite")
+        smoke_test(lite, full=False)
     if "--qt-smoke-only" in sys.argv:
         log("CI 快速模式：只构建 PyInstaller 主程序并验证 Qt 界面启动")
-        exe = run_pyinstaller(make_icon())
-        smoke_test(exe, full=False)
+        return 0
+    if "--lite" in sys.argv:
+        log("轻量版完成：%s（%s）" % (lite, human(lite.stat().st_size)))
         return 0
 
     chromium = find_chromium()
@@ -418,18 +461,19 @@ def main() -> int:
     log("ffmpeg  : %s（%s）" % (ffmpeg, human(ffmpeg.stat().st_size)))
     log("ffprobe : %s（%s）" % (ffprobe, human(ffprobe.stat().st_size)))
 
-    icon = make_icon()
     log("图标：%s" % icon.name)
 
-    exe = run_pyinstaller(icon)
+    exe = DIST / (APP_NAME + "-Full.exe")
+    ensure_unlocked(exe)
+    shutil.copy2(lite, exe)
     payload = build_payload(chromium, ffmpeg, ffprobe)
     append_payload(exe, payload)
     verify(exe)
     smoke_test(exe)
 
     log("=" * 56)
-    log("完成：%s" % exe)
-    log("大小：%s" % human(exe.stat().st_size))
+    log("完整版：%s（%s）" % (exe, human(exe.stat().st_size)))
+    log("轻量版：%s（%s）" % (lite, human(lite.stat().st_size)))
     log("首次运行会解压内置运行时到 %%LOCALAPPDATA%%\\Lumina\\runtime")
     return 0
 

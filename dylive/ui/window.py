@@ -18,12 +18,12 @@ from typing import Dict, List, Optional
 
 import requests
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QAction, QColor, QFont
 from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGridLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QPlainTextEdit, QPushButton,
-                               QSplitter, QTabWidget, QTableView, QVBoxLayout,
+                               QMenu, QSplitter, QTabWidget, QTableView, QVBoxLayout,
                                QWidget, QFileDialog)
 
 from .. import room as room_mod
@@ -34,6 +34,7 @@ from ..utils import (UA, add_rotating_file_log, log_dir,
                      quiet_noisy_loggers, setup_console)
 from . import theme
 from .first_run import ensure_runtime
+from .icons import app_icon, app_pixmap
 from .preview_feed import PreviewFeed
 from .settings import AppSettings, SettingsDialog
 from .tray import Tray
@@ -56,6 +57,14 @@ SPLIT_GAP = 14          # 分隔条宽度，同时也是左右两栏之间的视
 TAB_BAR_HEIGHT = 31     # 标签栏高度，预览列顶上要留同样高度才能和它对齐
 TAB_GAP = 8
 MIN_TABLE_WIDTH = 430   # 弹幕表最窄也要这么宽，不然内容列没法看
+
+
+def fit_window_dimensions(available_width: int,
+                          available_height: int) -> tuple[int, int, int, int]:
+    """按屏幕工作区算出宽、高和最小宽高，供窗口与兼容性测试共用。"""
+    width = min(max(640, min(1320, available_width - 40)), available_width)
+    height = min(max(480, min(860, available_height - 40)), available_height)
+    return width, height, min(1080, width), min(700, height)
 
 
 class QueueLogHandler(logging.Handler):
@@ -102,8 +111,8 @@ class MainWindow(QMainWindow):
         theme.set_mode(self.settings.theme)
 
         self.setWindowTitle(APP_TITLE)
-        self.resize(1320, 860)
-        self.setMinimumSize(1080, 700)
+        self.setWindowIcon(app_icon())
+        self._fit_to_screen()
 
         self.bridge = Bridge()
         self.log_handler = QueueLogHandler()
@@ -141,6 +150,19 @@ class MainWindow(QMainWindow):
                              args=(list(self.settings.rooms),),
                              name="ui-restore", daemon=True).start()
         self._log("%s 已就绪。输入直播间号或链接，点「添加」加入监测列表。" % APP_NAME)
+
+    def _fit_to_screen(self) -> None:
+        """在小屏和高缩放笔记本上也保证整个主窗口可见。"""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1320, 860)
+            self.setMinimumSize(1080, 700)
+            return
+        available = screen.availableGeometry()
+        width, height, minimum_width, minimum_height = fit_window_dimensions(
+            available.width(), available.height())
+        self.setMinimumSize(minimum_width, minimum_height)
+        self.resize(width, height)
 
     # -- 组装 -------------------------------------------------------------
 
@@ -207,10 +229,11 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(18, 0, 18, 0)
         lay.setSpacing(10)
 
-        mark = QLabel("拾")
-        mark.setObjectName("brandMark")
-        mark.setFixedSize(38, 38)
+        mark = QLabel()
+        mark.setObjectName("brandIcon")
+        mark.setFixedSize(42, 42)
         mark.setAlignment(Qt.AlignCenter)
+        mark.setPixmap(app_pixmap(42))
         lay.addWidget(mark)
 
         brand = QVBoxLayout()
@@ -234,11 +257,6 @@ class MainWindow(QMainWindow):
         self.add_btn.setObjectName("ghost")
         self.add_btn.setMinimumWidth(72)
         lay.addWidget(self.add_btn)
-
-        self.theme_btn = QPushButton()
-        self.theme_btn.setObjectName("iconBtn")
-        self.theme_btn.setToolTip("切换深浅色")
-        lay.addWidget(self.theme_btn)
 
         self.settings_btn = QPushButton("设置")
         self.settings_btn.setObjectName("ghost")
@@ -281,20 +299,25 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.room_list, 1)
 
         self.toggle_btn = QPushButton("开始")
-        self.remove_btn = QPushButton("移除")
-        self.open_btn = QPushButton("打开目录")
-        self.subtitle_btn = QPushButton("补做弹幕版…")
-        self.subtitle_btn.setToolTip(
+        self.toggle_btn.setObjectName("primary")
+        self.more_btn = QPushButton("更多")
+        self.more_btn.setObjectName("ghost")
+        menu = QMenu(self.more_btn)
+        self.open_action = QAction("打开录制目录", self)
+        self.subtitle_action = QAction("补做弹幕版…", self)
+        self.subtitle_action.setToolTip(
             "挑一场历史录像的 .jsonl，把弹幕封装成它的字幕轨（不重新编码）")
-        for b in (self.toggle_btn, self.remove_btn, self.open_btn, self.subtitle_btn):
-            b.setObjectName("ghost")
-        for pair in ((self.toggle_btn, self.remove_btn),
-                     (self.open_btn, self.subtitle_btn)):
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            for b in pair:
-                row.addWidget(b, 1)
-            lay.addLayout(row)
+        self.remove_action = QAction("移除房间", self)
+        menu.addAction(self.open_action)
+        menu.addAction(self.subtitle_action)
+        menu.addSeparator()
+        menu.addAction(self.remove_action)
+        self.more_btn.setMenu(menu)
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addWidget(self.toggle_btn, 2)
+        actions.addWidget(self.more_btn, 1)
+        lay.addLayout(actions)
 
         self.summary = QLabel("—")
         self.summary.setObjectName("hint")
@@ -464,14 +487,13 @@ class MainWindow(QMainWindow):
         self.add_btn.clicked.connect(self._on_add)
         self.input.returnPressed.connect(self._on_add)
         self.settings_btn.clicked.connect(self._open_settings)
-        self.theme_btn.clicked.connect(self._toggle_theme)
         self.start_all_btn.clicked.connect(self._start_all)
         self.stop_all_btn.clicked.connect(self._stop_all)
         self.toggle_btn.clicked.connect(self._toggle_selected)
-        self.remove_btn.clicked.connect(self._remove_selected)
-        self.open_btn.clicked.connect(self._open_folder)
+        self.remove_action.triggered.connect(self._remove_selected)
+        self.open_action.triggered.connect(self._open_folder)
         self.log_dir_btn.clicked.connect(self._open_log_folder)
-        self.subtitle_btn.clicked.connect(self._embed_subtitles)
+        self.subtitle_action.triggered.connect(self._embed_subtitles)
         self.bridge.subtitle_log.connect(self._log)
         self.bridge.subtitle_done.connect(self._on_subtitle_done)
         self.preview_feed.frame.connect(self._on_preview_frame)
@@ -480,7 +502,6 @@ class MainWindow(QMainWindow):
         self.bridge.room_resolved.connect(self._on_room_resolved)
         self.bridge.resolve_failed.connect(self._on_resolve_failed)
         self.bridge.avatar_ready.connect(self._on_avatar)
-        self._refresh_theme_button()
 
     def _make_tray(self) -> Tray:
         return Tray(self, on_show=self._show_from_tray,
@@ -688,9 +709,13 @@ class MainWindow(QMainWindow):
         before_pv = (self.settings.preview_width, self.settings.preview_fps)
         before_verbose = self.settings.verbose_log
         before_tray = self.settings.tray
+        before_theme = self.settings.theme
         dialog.apply_to(self.settings)
         self.settings.save()
         self._log("设置已保存。")
+
+        if before_theme != self.settings.theme:
+            self._apply_theme(self.settings.theme)
 
         if before_tray != self.settings.tray:
             self.tray.hide()
@@ -721,12 +746,6 @@ class MainWindow(QMainWindow):
             self._stop_preview()
             self.preview_view.clear_frame("正在按新设置重连…")
 
-    def _toggle_theme(self) -> None:
-        mode = "dark" if theme.current() == "light" else "light"
-        self.settings.theme = mode
-        self.settings.save()
-        self._apply_theme(mode)
-
     def _apply_theme(self, mode: str) -> None:
         theme.set_mode(mode)
         app = QApplication.instance()
@@ -741,10 +760,6 @@ class MainWindow(QMainWindow):
             row._reset_avatar()
             if rid in self.avatars:
                 row.set_avatar(self.avatars[rid])
-        self._refresh_theme_button()
-
-    def _refresh_theme_button(self) -> None:
-        self.theme_btn.setText("🌙" if theme.current() == "light" else "☀")
 
     # -- 预览 -------------------------------------------------------------
 
@@ -895,7 +910,7 @@ class MainWindow(QMainWindow):
         entry = self.manager.get(self.selected or "")
         self.toggle_btn.setText("停止" if (entry and entry.active) else "开始")
         self.toggle_btn.setEnabled(entry is not None)
-        self.remove_btn.setEnabled(entry is not None)
+        self.remove_action.setEnabled(entry is not None)
 
     def _note_state(self, entry, state: str, st) -> None:
         """认出「开播了」和「收工了」这两个瞬间，该通知就通知。
@@ -1017,8 +1032,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, "找不到 ffmpeg，无法封装。")
             return
 
-        self.subtitle_btn.setEnabled(False)
-        self.subtitle_btn.setText("处理中…")
+        self.subtitle_action.setEnabled(False)
+        self.subtitle_action.setText("正在补做弹幕版…")
         self._log("开始补做弹幕版：%s（%d 个片段）" % (jsonl.stem, len(videos)))
         threading.Thread(target=self._subtitle_worker, args=(ffmpeg, jsonl, videos),
                          name="ui-subtitle", daemon=True).start()
@@ -1041,8 +1056,8 @@ class MainWindow(QMainWindow):
         self.bridge.subtitle_done.emit(len(results), "")
 
     def _on_subtitle_done(self, count: int, error: str) -> None:
-        self.subtitle_btn.setEnabled(True)
-        self.subtitle_btn.setText("补做弹幕版…")
+        self.subtitle_action.setEnabled(True)
+        self.subtitle_action.setText("补做弹幕版…")
         if error:
             self._log("补做失败：%s" % error)
             QMessageBox.critical(self, APP_NAME, "补做弹幕版失败：\n%s" % error)
@@ -1112,6 +1127,7 @@ def _human(num: int) -> str:
 
 def main(argv: Optional[List[str]] = None) -> int:
     setup_console()
+    paths.set_app_identity()
     # 根 logger 开到 DEBUG，各处理器自己再挑：界面只要 INFO，日志文件
     # 按「详细日志」这个开关决定要不要收 DEBUG
     logging.basicConfig(level=logging.DEBUG, handlers=[logging.NullHandler()],
@@ -1123,6 +1139,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = [arg for arg in args if arg != "--smoke-test-gui"]
     app = QApplication(args)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(app_icon())
 
     saved = AppSettings.load()
     logfile = add_rotating_file_log(saved.verbose_log)
@@ -1144,6 +1161,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     app.setQuitOnLastWindowClosed(not window.tray.available)
     window.show()
     if smoke_test:
-        # 不是只 import：窗口需真正显示、进入事件循环再关闭，尽量贴近双击启动。
-        QTimer.singleShot(500, window._quit_from_tray)
+        # 不是只 import：真正发送鼠标/键盘事件操作主窗口和设置对话框。
+        from .smoke import schedule
+        schedule(window)
     return app.exec()

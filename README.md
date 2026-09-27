@@ -35,7 +35,7 @@ WebSocket 抓下来解成结构化事件。两边共用同一个起录时刻做�
 - **守候模式**：没开播就挂着，开播自动开录，下播自动收工继续守候
 - **三层断线重连**，并且能区分「主播下播了」和「我这边断网了」
 - **实时预览**：另拉一路最低画质的流，不碰录制那一路
-- **不用装任何东西**：Windows 单文件 exe 自带 Chromium、ffmpeg 和 ffprobe
+- **两个 Windows 版本**：Full 自带全部依赖，Lite 复用系统 Edge 与 FFmpeg
 - 浅色 / 深色主题
 
 <details>
@@ -49,12 +49,19 @@ WebSocket 抓下来解成结构化事件。两边共用同一个起录时刻做�
 
 ### Windows：直接用 exe
 
-到 [Releases](../../releases) 下载 `Lumina.exe`，双击就能用，**不需要装 Python、
-ffmpeg 或浏览器**。
+到 [Releases](../../releases) 选择一个版本：
 
-首次启动会弹一个进度框，把内置的 Chromium、ffmpeg 和 ffprobe 解压到
-`%LOCALAPPDATA%\Lumina\runtime`（约 640MB，一次性）。之后每次启动直接复用。
+- `Lumina-Full.exe`（约 379MB，推荐）：自带 Chromium、FFmpeg 和 FFprobe，
+  双击就能用，不需要安装其他软件。
+- `Lumina-Lite.exe`（约 86MB）：复用电脑里的 Edge（找不到时再尝试 Chrome）以及
+  PATH 中的 FFmpeg/FFprobe，适合已经配置好环境的用户。
+
+Full 版首次启动会弹一个进度框，把内置的 Chromium、FFmpeg、FFprobe 和共享库解压到
+`%LOCALAPPDATA%\Lumina\runtime`（约 662MB，一次性）。之后每次启动直接复用。
 想彻底清干净就删掉 `%LOCALAPPDATA%\Lumina` 整个目录。
+
+主界面「设置 → 运行环境 → 立即检查」会逐项检查浏览器、FFmpeg、FFprobe 和网络，
+Lite 版缺依赖时也会在这里明确显示具体原因。
 
 > 这个 exe 没有代码签名，Windows SmartScreen 可能会拦一下 ——
 > 点「更多信息」→「仍要运行」即可。
@@ -63,13 +70,13 @@ ffmpeg 或浏览器**。
 （要定位到具体是哪一环断了，用下面的 [链路诊断](#先跑一遍诊断别猜)）：
 
 ```bash
-Lumina.exe --selftest
+Lumina-Full.exe --selftest
 ```
 
 结果同时写到 `%LOCALAPPDATA%\Lumina\selftest.txt`。程序启动阶段真崩了的话，
 traceback 在同目录的 `crash.log` 里。
 
-发布包或无人值守环境可以用 `Lumina.exe --selftest-headless` 跑相同检查，不弹窗口，
+发布包或无人值守环境可以用 `Lumina-Full.exe --selftest-headless` 跑相同检查，不弹窗口，
 结果仍写入 `selftest.txt`，并用退出码表示是否全部通过。
 
 ### 从源码运行（Windows / macOS / Linux）
@@ -276,10 +283,21 @@ CPU 和带宽开销都很低。它顺带还能拿到页面自己请求的 `enter
 python build_exe.py
 ```
 
-产物是 `dist/Lumina.exe`，约 366MB。分两步，第二步是重点：
+默认会同时生成 `dist/Lumina-Full.exe`（约 379MB）和
+`dist/Lumina-Lite.exe`（约 86MB）。只需要 Lite 时可运行：
+
+```bash
+python build_exe.py --lite
+```
+
+Full 版分两步，第二步是重点：
 
 1. PyInstaller 打出只含 Python + Qt + Playwright 驱动的单文件 exe（约 85MB）；
-2. 把 Chromium、ffmpeg 和 ffprobe 压成 zip **追加到 exe 尾部**。
+2. 把 Chromium、FFmpeg、FFprobe 和共享 DLL 压成 zip **追加到 exe 尾部**。
+
+发布构建建议使用 Gyan full shared 版，并把它的 `bin` 目录放进
+`LUMINA_FFMPEG_DIR`；FFmpeg 与 FFprobe 共用 DLL，可比两个 full 静态程序减少约 74MB。
+没有设置这个变量时仍会使用 PATH 中的静态版，但 Full 包会更大。
 
 之所以不把浏览器交给 PyInstaller，是因为单文件模式每次启动都会把打包内容解压
 到临时目录 —— Chromium 有三百多个文件、四百多 MB，走那条路每次冷启动都要几十秒，
@@ -291,9 +309,8 @@ python build_exe.py
 构建号变了就自动重新解压，换版本不用手动清缓存。相关代码在
 [runtime.py](dylive/runtime.py)。
 
-打包版只带完整版 Chromium 一份（不带 headless shell），所以浏览器引擎里钉了
-`channel="chromium"` —— 新版 Playwright 的 headless 默认会去找单独的 headless
-shell，不钉住的话打包版起不来。
+Full 版只带完整版 Chromium 一份（不带 headless shell），所以固定使用内置
+`channel="chromium"`；Lite 版则自动优先选择系统 `msedge`，其次是 `chrome`。
 
 ### macOS
 

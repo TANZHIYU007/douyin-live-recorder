@@ -131,14 +131,7 @@ QToolTip {
     background: %(surface)s;
     border-bottom: 1px solid %(border)s;
 }
-#brandMark {
-    border-radius: 10px;
-    color: #FFFFFF;
-    font-size: 15px;
-    font-weight: 800;
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                stop:0 %(accent)s, stop:1 #7B2FF7);
-}
+#brandIcon { background: transparent; }
 #brandName { font-size: 17px; font-weight: 700; letter-spacing: 0.5px; }
 #brandSub  { color: %(muted)s; font-size: 11px; }
 

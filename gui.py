@@ -19,7 +19,7 @@ def _crash_log() -> Path:
     return app_data_dir() / "crash.log"
 
 
-def _on_uncaught(exc_type, exc, tb) -> None:
+def _on_uncaught(exc_type, exc, tb, show_dialog: bool = True) -> None:
     if issubclass(exc_type, KeyboardInterrupt):
         return
     text = "".join(traceback.format_exception(exc_type, exc, tb))
@@ -32,6 +32,8 @@ def _on_uncaught(exc_type, exc, tb) -> None:
         path = None
 
     sys.stderr.write(text) if sys.stderr else None
+    if not show_dialog:
+        return
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
         # 得留个引用：QApplication 被回收掉的话弹不出对话框
@@ -48,10 +50,14 @@ def _run_selftest() -> int:
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     from dylive.selftest import run as check
+    from dylive.paths import set_app_identity
     from dylive.ui.first_run import ensure_runtime
+    from dylive.ui.icons import app_icon
     from dylive.ui.theme import stylesheet
 
+    set_app_identity()
     app = QApplication(sys.argv[:1])
+    app.setWindowIcon(app_icon())
     app.setStyleSheet(stylesheet())
     # 先把内置运行时准备好，否则自检测的是「还没解压」这个废话
     error = ensure_runtime()
@@ -79,7 +85,8 @@ def _run_selftest_headless() -> int:
         runtime.apply_env()
         ok, text = check()
     except Exception:                   # 和正常启动一样，把完整堆栈留在 crash.log
-        _on_uncaught(*sys.exc_info())
+        # 这是给构建/自动诊断用的无界面模式，失败时也不能弹框卡住进程。
+        _on_uncaught(*sys.exc_info(), show_dialog=False)
         return 1
     if sys.stdout:
         print(text)

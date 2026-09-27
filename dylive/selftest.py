@@ -31,6 +31,8 @@ def _check_runtime() -> Tuple[bool, str]:
         return True, "源码运行，使用系统 ffmpeg 与 Playwright 浏览器"
     if not runtime.is_ready():
         return False, "内置运行时尚未解压（正常启动一次即可）"
+    if runtime.read_footer() is None and runtime.bundled_runtime() is None:
+        return True, "轻量版，使用系统依赖；浏览器通道 %s" % runtime.browser_channel()
     target = runtime.runtime_dir()
     count = sum(1 for _ in target.rglob("*"))
     return True, "已解压到 %s（%d 个条目）" % (target, count)
@@ -73,7 +75,8 @@ def _check_browser() -> Tuple[bool, str]:
     started = time.time()
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(channel="chromium", headless=True,
+            channel = runtime.browser_channel()
+            browser = pw.chromium.launch(channel=channel, headless=True,
                                          args=["--mute-audio"])
             page = browser.new_page()
             page.goto("about:blank")
@@ -81,8 +84,8 @@ def _check_browser() -> Tuple[bool, str]:
             browser.close()
     except Exception as exc:            # noqa: BLE001 - 结果要写进报告
         return False, "启动 Chromium 失败：%s" % str(exc)[:400]
-    return True, "Chromium %s 启动正常（%.1f 秒）；浏览器目录 %s" % (
-        version, time.time() - started,
+    return True, "%s / Chromium %s 启动正常（%.1f 秒）；浏览器目录 %s" % (
+        channel, version, time.time() - started,
         os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "系统默认"))
 
 

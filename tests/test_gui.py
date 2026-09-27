@@ -22,6 +22,21 @@ def test_headless_自检失败时返回非零(monkeypatch):
     assert gui._run_selftest_headless() == 1
 
 
+def test_headless_异常会写日志但不弹错误框(monkeypatch, tmp_path):
+    crash_log = tmp_path / "crash.log"
+    monkeypatch.setattr(runtime, "extract",
+                        lambda: (_ for _ in ()).throw(OSError("损坏")))
+    monkeypatch.setattr(gui, "_crash_log", lambda: crash_log)
+
+    shown = []
+    monkeypatch.setattr("PySide6.QtWidgets.QMessageBox.critical",
+                        lambda *args: shown.append(args))
+
+    assert gui._run_selftest_headless() == 1
+    assert "OSError: 损坏" in crash_log.read_text(encoding="utf-8")
+    assert shown == []
+
+
 def test_正常启动异常会转成非零退出码(monkeypatch):
     seen = []
     monkeypatch.setattr(gui, "_on_uncaught",

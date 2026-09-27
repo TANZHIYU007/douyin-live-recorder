@@ -8,16 +8,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFileDialog,
                                QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
-                               QWidget)
+                               QMessageBox, QPushButton, QScrollArea, QSpinBox,
+                               QVBoxLayout, QWidget)
 
 from .. import paths, runtime
 from ..messages import DEFAULT_KINDS, KIND_BY_METHOD
@@ -32,6 +35,10 @@ ALL_KINDS = [k for k in ("chat", "emoji", "gift", "social", "member", "like",
 
 SUBTITLE_STYLES = [("左下角聊天流（像直播间）", "chat"),
                    ("滚动弹幕（飘过屏幕）", "scroll")]
+
+
+class _EnvironmentReporter(QObject):
+    done = Signal(bool, str)
 
 QUALITIES = [("原画", "origin"), ("蓝光", "FULL_HD1"), ("超清", "HD1"),
              ("高清", "SD1"), ("标清", "SD2")]
@@ -92,19 +99,62 @@ class AppSettings:
         path = config_path()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, UnicodeError, ValueError):
             return cls()
+        if not isinstance(data, dict):
+            return cls()
+
+        # dataclass 不会在运行时检查类型。旧版本、手改或损坏配置里若出现
+        # segment_minutes="abc" 之类的值，Qt 控件 setValue 会直接抛异常。
+        defaults = cls()
         known = set(cls.__dataclass_fields__)              # 忽略旧版本残留的字段
-        return cls(**{k: v for k, v in data.items() if k in known})
+        clean = {}
+        for key, value in data.items():
+            if key not in known:
+                continue
+            default = getattr(defaults, key)
+            if isinstance(default, bool):
+                valid = isinstance(value, bool)
+            elif isinstance(default, int):
+                valid = isinstance(value, int) and not isinstance(value, bool)
+            elif isinstance(default, float):
+                valid = (isinstance(value, (int, float))
+                         and not isinstance(value, bool))
+                if valid:
+                    value = float(value)
+            elif isinstance(default, list):
+                valid = isinstance(value, list) and all(
+                    isinstance(item, str) for item in value)
+            else:
+                valid = isinstance(value, str)
+            if valid:
+                clean[key] = value
+        return cls(**clean)
 
     def save(self) -> None:
         path = config_path()
+        temp_path = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2),
-                            encoding="utf-8")
+            # 先在同目录写完整临时文件，再原子替换。断电或强退最多留下临时
+            # 文件，不会把原配置截成半段、连监测房间列表一起丢掉。
+            fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp",
+                                        dir=str(path.parent))
+            temp_path = Path(name)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(asdict(self), fh, ensure_ascii=False, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temp_path, path)
+            temp_path = None
         except OSError as exc:
             log.warning("保存配置失败：%s", exc)
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
 
 
 class SettingsDialog(QDialog):
@@ -114,6 +164,8 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("录制设置")
         self._settings = settings
+        self._environment_reporter = _EnvironmentReporter(self)
+        self._environment_reporter.done.connect(self._environment_checked)
 
         # 卡片攒起来有八百多像素高，1366x768 的笔记本上直接放不下，
         # 所以内容区放进滚动条里，按钮固定在底部始终可见
@@ -293,6 +345,25 @@ class SettingsDialog(QDialog):
         adv.body.itemAt(adv.body.count() - 1).widget().setObjectName("hint")
         body.addWidget(adv)
 
+        appearance = Card("界面")
+        self.theme_mode = QComboBox()
+        self.theme_mode.addItem("浅色", "light")
+        self.theme_mode.addItem("深色", "dark")
+        self.theme_mode.setCurrentIndex(0 if settings.theme == "light" else 1)
+        appearance.body.addWidget(Field("主题", self.theme_mode))
+        body.addWidget(appearance)
+
+        environment = Card("运行环境")
+        self.environment_status = QLabel(runtime.describe())
+        self.environment_status.setObjectName("hint")
+        self.environment_status.setWordWrap(True)
+        self.environment_check = QPushButton("立即检查")
+        self.environment_check.setObjectName("ghost")
+        self.environment_check.clicked.connect(self._check_environment)
+        environment.body.addWidget(self.environment_status)
+        environment.body.addWidget(self.environment_check)
+        body.addWidget(environment)
+
         self._sync_subtitle_enabled(settings.embed_subtitle)
         self._sync_tray_enabled(settings.tray)
 
@@ -333,6 +404,26 @@ class SettingsDialog(QDialog):
         if folder:
             self.out_edit.setText(folder)
 
+    def _check_environment(self) -> None:
+        self.environment_check.setEnabled(False)
+        self.environment_check.setText("检查中…")
+        self.environment_status.setText("正在检查浏览器、FFmpeg、FFprobe 和网络…")
+
+        def work() -> None:
+            from ..selftest import run
+            ok, report = run()
+            self._environment_reporter.done.emit(ok, report)
+
+        threading.Thread(target=work, name="environment-check", daemon=True).start()
+
+    def _environment_checked(self, ok: bool, report: str) -> None:
+        self.environment_check.setEnabled(True)
+        self.environment_check.setText("重新检查")
+        self.environment_status.setText(
+            "✓ 运行环境正常" if ok else "发现缺失或异常，点击重新检查可再次验证")
+        box = QMessageBox.information if ok else QMessageBox.warning
+        box(self, "运行环境检查", report)
+
     def apply_to(self, settings: AppSettings) -> None:
         settings.out_dir = self.out_edit.text().strip() or settings.out_dir
         settings.quality = QUALITIES[self.quality.currentIndex()][1]
@@ -359,6 +450,7 @@ class SettingsDialog(QDialog):
         settings.verbose_log = self.cb_verbose.isChecked()
         settings.headful = self.cb_headful.isChecked()
         settings.keep_login = self.cb_login.isChecked()
+        settings.theme = self.theme_mode.currentData()
 
 
 def _row(items, stretch_end: bool = False) -> QWidget:

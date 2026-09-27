@@ -26,6 +26,9 @@ lumina = "main:main"
 packages = ["dylive", "dylive.ui"]
 py-modules = ["main"]
 
+[tool.setuptools.package-data]
+"dylive.ui" = ["assets/*.png"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

@@ -16,7 +16,10 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import time
+import uuid
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
@@ -32,6 +35,8 @@ FFMPEG_REL = "bin/ffmpeg" + paths.EXE_SUFFIX
 FFPROBE_REL = "bin/ffprobe" + paths.EXE_SUFFIX
 
 _STAMP = ".build_id"
+_LOCK_FILE = ".runtime.lock"
+_LOCK_TIMEOUT = 300.0
 
 
 def is_frozen() -> bool:
@@ -98,9 +103,67 @@ def is_ready() -> bool:
         return True                     # 源码运行，不需要这套
     stamp = runtime_dir() / _STAMP
     try:
-        return stamp.read_text(encoding="ascii").strip() == info[2]
+        if stamp.read_text(encoding="ascii").strip() != info[2]:
+            return False
     except OSError:
         return False
+    target = runtime_dir()
+    browsers = target / BROWSERS_DIR
+    chrome = next(browsers.glob("chromium-*/chrome-win*/chrome.exe"), None)
+    return (chrome is not None
+            and (target / FFMPEG_REL).is_file()
+            and (target / FFPROBE_REL).is_file())
+
+
+@contextmanager
+def _runtime_lock(progress: Optional[Callable[[int, int, str], None]] = None):
+    """跨进程串行化首次解压；进程异常退出时系统会自动释放文件锁。"""
+    root = paths.app_data_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / _LOCK_FILE
+    handle = lock_path.open("a+b")
+    acquired = False
+    try:
+        if lock_path.stat().st_size == 0:
+            handle.write(b"\0")
+            handle.flush()
+
+        deadline = time.monotonic() + _LOCK_TIMEOUT
+        waiting_reported = False
+        while True:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except (OSError, BlockingIOError) as exc:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "等待另一个拾光完成运行环境准备超时，请关闭其他拾光窗口后重试"
+                    ) from exc
+                if progress is not None and not waiting_reported:
+                    progress(0, 1, "正在等待另一个拾光完成运行环境准备…")
+                    waiting_reported = True
+                time.sleep(0.2)
+        yield
+    finally:
+        if acquired:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        handle.close()
 
 
 class _Slice:
@@ -158,25 +221,40 @@ def extract(progress: Optional[Callable[[int, int, str], None]] = None) -> None:
     if info is None:
         return
     offset, size, build_id = info
+    if is_ready():
+        return
 
-    target = runtime_dir()
-    if target.exists():
-        shutil.rmtree(target, ignore_errors=True)   # 换构建了，旧的直接丢
-    target.mkdir(parents=True, exist_ok=True)
+    # 两次快速双击会同时走到这里。文件锁让第二个进程等待，第一个完成后
+    # 再检查一次并直接复用，避免双方互删文件。
+    with _runtime_lock(progress):
+        if is_ready():
+            return
 
-    with _Slice(Path(sys.executable), offset, size) as blob:
-        with zipfile.ZipFile(blob) as zf:
-            members = zf.infolist()
-            total = sum(m.file_size for m in members) or 1
-            done = 0
-            for member in members:
-                zf.extract(member, target)
-                done += member.file_size
-                if progress is not None:
-                    progress(done, total, member.filename)
+        target = runtime_dir()
+        staging = target.parent / (".runtime-preparing-%d-%s"
+                                   % (os.getpid(), uuid.uuid4().hex))
+        staging.mkdir(parents=True, exist_ok=False)
+        try:
+            with _Slice(Path(sys.executable), offset, size) as blob:
+                with zipfile.ZipFile(blob) as zf:
+                    members = zf.infolist()
+                    total = sum(m.file_size for m in members) or 1
+                    done = 0
+                    for member in members:
+                        zf.extract(member, staging)
+                        done += member.file_size
+                        if progress is not None:
+                            progress(done, total, member.filename)
 
-    # 标记文件最后写：中途失败的话下次会重新解压，不会留下半个环境
-    (target / _STAMP).write_text(build_id, encoding="ascii")
+            # 标记最后写进临时目录，完整解压后才替换正式目录。中断时用户
+            # 要么仍有旧环境，要么没有环境，绝不会看到“带标记的半成品”。
+            (staging / _STAMP).write_text(build_id, encoding="ascii")
+            if target.exists():
+                shutil.rmtree(target)
+            staging.replace(target)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
 
 
 def apply_env() -> None:
@@ -186,6 +264,32 @@ def apply_env() -> None:
     browsers = runtime_dir() / BROWSERS_DIR
     if browsers.is_dir():
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
+
+
+def browser_channel() -> str:
+    """完整版用内置 Chromium；轻量版优先复用系统 Edge/Chrome。"""
+    if bundled_runtime() is not None or read_footer() is not None:
+        return "chromium"
+    if paths.WINDOWS and is_frozen():
+        candidates = (
+            ("msedge", os.environ.get("PROGRAMFILES(X86)", ""),
+             "Microsoft/Edge/Application/msedge.exe"),
+            ("msedge", os.environ.get("PROGRAMFILES", ""),
+             "Microsoft/Edge/Application/msedge.exe"),
+            ("msedge", os.environ.get("LOCALAPPDATA", ""),
+             "Microsoft/Edge/Application/msedge.exe"),
+            ("chrome", os.environ.get("PROGRAMFILES", ""),
+             "Google/Chrome/Application/chrome.exe"),
+            ("chrome", os.environ.get("PROGRAMFILES(X86)", ""),
+             "Google/Chrome/Application/chrome.exe"),
+            ("chrome", os.environ.get("LOCALAPPDATA", ""),
+             "Google/Chrome/Application/chrome.exe"),
+        )
+        for channel, root, relative in candidates:
+            if root and (Path(root) / relative).is_file():
+                return channel
+    # 源码环境和自行安装过 Playwright Chromium 的轻量版仍可走原逻辑。
+    return "chromium"
 
 
 def bundled_ffmpeg() -> str:
@@ -223,5 +327,7 @@ def describe() -> str:
         return "内置运行时（随程序分发），位于 %s" % runtime_dir()
     info = read_footer()
     if info is None:
+        if is_frozen():
+            return "轻量版（使用系统 ffmpeg 与 %s）" % browser_channel()
         return "源码运行（使用系统 ffmpeg 与 Playwright 浏览器）"
     return "内置运行时 %s，位于 %s" % (info[2][:8], runtime_dir())
