@@ -12,7 +12,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlsplit
 
 import requests
 
@@ -76,25 +76,41 @@ class RoomInfo:
 
 
 def parse_target(target: str, session: Optional[requests.Session] = None) -> str:
-    """把用户输入（房间号 / 直播间链接 / v.douyin.com 短链）统一成 web_rid。"""
+    """把房间号、抖音直播链接或短链统一成 web_rid。"""
     target = target.strip()
-    if target.isdigit():
+    if re.fullmatch(r"[0-9]+", target):
         return target
 
-    if "v.douyin.com" in target:
-        sess = session or make_session()
-        target = sess.get(target, allow_redirects=True, timeout=10).url
-        log.info("短链跳转到 %s", target)
+    # 兼容用户省略 https:// 的粘贴方式，但只接受抖音自己的域名。
+    url = target if "://" in target else "//" + target
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("", "http", "https"):
+        raise ValueError("无法从 %r 中解析出直播间号" % target)
 
-    m = re.search(r"live\.douyin\.com/(\d+)", target)
-    if m:
-        return m.group(1)
-    m = re.search(r"[?&]web_rid=(\d+)", target)
-    if m:
-        return m.group(1)
-    m = re.search(r"(\d{6,})", urlparse(target).path)
-    if m:
-        return m.group(1)
+    if host == "v.douyin.com":
+        sess = session or make_session()
+        target = sess.get(target if parsed.scheme else "https:" + url,
+                          allow_redirects=True, timeout=10).url
+        log.info("短链跳转到 %s", target)
+        parsed = urlsplit(target)
+        host = (parsed.hostname or "").lower()
+
+    if host not in {"douyin.com", "www.douyin.com", "m.douyin.com",
+                    "live.douyin.com"}:
+        raise ValueError("无法从 %r 中解析出直播间号" % target)
+
+    # 只把完整的数字路径视为房间号，避免误取视频或用户路径里的数字。
+    match = re.fullmatch(r"/([0-9]+)/?", parsed.path)
+    if match:
+        return match.group(1)
+
+    # 新分享链接使用 live_web_rid；旧版页面仍使用 web_rid。
+    query = parse_qs(parsed.query)
+    for key in ("live_web_rid", "web_rid"):
+        for value in query.get(key, ()):
+            if re.fullmatch(r"[0-9]+", value):
+                return value
     raise ValueError("无法从 %r 中解析出直播间号" % target)
 
 

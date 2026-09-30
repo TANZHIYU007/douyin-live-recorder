@@ -156,7 +156,6 @@ class RoomManager:
         self.hub = BrowserHub(headless=headless, user_data_dir=user_data_dir,
                               cookie=cookie, proxy=proxy)
         self._rooms: Dict[str, Room] = {}
-        self._order: List[str] = []
         self._lock = threading.Lock()
 
     # -- 增删 -------------------------------------------------------------
@@ -167,14 +166,11 @@ class RoomManager:
                 return self._rooms[web_rid]
             entry = Room(web_rid, self.hub, self.make_options)
             self._rooms[web_rid] = entry
-            self._order.append(web_rid)
             return entry
 
     def remove(self, web_rid: str) -> None:
         with self._lock:
             entry = self._rooms.pop(web_rid, None)
-            if web_rid in self._order:
-                self._order.remove(web_rid)
         if entry is not None:
             entry.stop()
 
@@ -184,7 +180,7 @@ class RoomManager:
 
     def rooms(self) -> List[Room]:
         with self._lock:
-            return [self._rooms[r] for r in self._order if r in self._rooms]
+            return list(self._rooms.values())  # dict 保持添加顺序，无需另存一份顺序表
 
     # -- 批量 -------------------------------------------------------------
 

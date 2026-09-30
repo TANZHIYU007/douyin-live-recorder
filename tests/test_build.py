@@ -2,7 +2,10 @@
 
 import zipfile
 
+import pytest
+
 import build_exe
+from dylive import runtime
 
 
 def test_find_ffprobe_优先找_ffmpeg_同目录(tmp_path):
@@ -98,3 +101,42 @@ def test_归档检查识别根目录_icu_污染():
     ]
 
     assert build_exe.unexpected_root_icu(names) == ["icudt78.dll", "icuuc.dll"]
+
+
+def test_payload_append_and_runtime_reader_agree(tmp_path):
+    exe = tmp_path / "Lumina.exe"
+    exe.write_bytes(b"fake-executable")
+    payload = tmp_path / "payload.zip"
+    with zipfile.ZipFile(payload, "w") as zf:
+        for name in ("bin/ffmpeg.exe", "bin/ffprobe.exe", "browser/chrome.exe"):
+            zf.writestr(name, b"test")
+    build_exe.append_payload(exe, payload)
+    offset, size, build_id = runtime.read_footer(exe)
+    assert offset == len(b"fake-executable")
+    assert size == payload.stat().st_size
+    assert len(build_id) == runtime.BUILD_ID_LEN
+    assert exe.read_bytes()[offset:offset + size] == payload.read_bytes()
+    build_exe.verify(exe)
+
+
+@pytest.mark.parametrize("raw", [
+    b"", b"truncated", b"x" * runtime.FOOTER_LEN,
+    runtime.MAGIC + (100000).to_bytes(8, "little") + b"a" * runtime.BUILD_ID_LEN,
+])
+def test_invalid_payload_is_rejected(tmp_path, raw):
+    exe = tmp_path / "broken.exe"
+    exe.write_bytes(raw)
+    assert runtime.read_footer(exe) is None
+    with pytest.raises(SystemExit):
+        build_exe.verify(exe)
+
+
+def test_incomplete_payload_is_rejected(tmp_path):
+    exe = tmp_path / "missing-tool.exe"
+    exe.write_bytes(b"fake-executable")
+    payload = tmp_path / "payload.zip"
+    with zipfile.ZipFile(payload, "w") as zf:
+        zf.writestr("bin/ffmpeg.exe", b"test")
+    build_exe.append_payload(exe, payload)
+    with pytest.raises(SystemExit, match="载荷内容不完整"):
+        build_exe.verify(exe)

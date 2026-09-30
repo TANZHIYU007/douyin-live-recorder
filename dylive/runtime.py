@@ -8,7 +8,7 @@ PyInstaller 单文件模式每次启动都会把打包内容解压到临时目�
 exe 依然是单个文件，冷启动只需要解压 Python 和 Qt 那部分。
 
 尾部结构：
-    [PyInstaller 的 exe] [payload.zip] [MAGIC(16)] [zip 长度(u64 LE)] [构建号(32)]
+    [PyInstaller 的 exe] [payload.zip] [MAGIC] [zip 长度(u64 LE)] [构建号(32)]
 """
 
 from __future__ import annotations
@@ -69,11 +69,12 @@ def runtime_dir() -> Path:
     return paths.app_data_dir() / "runtime"
 
 
-def read_footer() -> Optional[Tuple[int, int, str]]:
+def read_footer(exe: Optional[Path] = None) -> Optional[Tuple[int, int, str]]:
     """读 exe 尾部的载荷信息，返回 (偏移, 长度, 构建号)。没有则 None。"""
-    if not is_frozen():
-        return None
-    exe = Path(sys.executable)
+    if exe is None:
+        if not is_frozen():
+            return None
+        exe = Path(sys.executable)
     try:
         total = exe.stat().st_size
         if total < FOOTER_LEN:

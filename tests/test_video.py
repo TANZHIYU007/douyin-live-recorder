@@ -146,3 +146,15 @@ def test_文件还没生成时返回空(tmp_path):
 
 def test_容器表覆盖了界面里能选的四种():
     assert set(video.CONTAINERS) == {"mp4", "flv", "ts", "mkv"}
+
+
+def test_segment_file_lookup_treats_percent_and_brackets_literally(tmp_path):
+    r = rec(out=tmp_path / "100%[直播]", segment_seconds=60)
+    expected = tmp_path / "100%[直播]_part000.mp4"
+    expected.write_bytes(b"x")
+    (tmp_path / "100其他直播_part000.mp4").write_bytes(b"x")
+    assert r.files() == [expected]
+
+
+def test_segment_file_lookup_tolerates_missing_directory(tmp_path):
+    assert rec(out=tmp_path / "missing" / "video", segment_seconds=60).files() == []

@@ -6,6 +6,7 @@
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -160,6 +161,51 @@ def test_聊天流的底框那条不带颜色标签(tmp_path):
             assert "\\c&H" in line
 
 
+def test_聊天流安静时持续显示到下一条并延续到片段结束(tmp_path):
+    out = tmp_path / "chat.ass"
+    subtitle.build_ass([ev(1.0, "第一条"), ev(40.0, "第二条")], out,
+                       Style(mode=subtitle.CHAT, duration=4.0),
+                       shift=0.0, window=(0.0, 120.0))
+    layers = [line for line in out.read_text(encoding="utf-8-sig").splitlines()
+              if line.startswith("Dialogue: 0,")]
+
+    assert len(layers) == 2
+    assert layers[0].startswith("Dialogue: 0,0:00:01.00,0:00:40.00,")
+    assert layers[1].startswith("Dialogue: 0,0:00:40.00,0:02:00.00,")
+    assert "第一条" in layers[0] and "第二条" not in layers[0]
+    assert "第一条" in layers[1] and "第二条" in layers[1]
+
+
+def test_聊天流分片继承上段消息并由新消息顶走(tmp_path):
+    events = [ev(90.0, "第一条"), ev(95.0, "第二条"), ev(150.0, "第三条")]
+    out = tmp_path / "part2.ass"
+    count = subtitle.build_ass(events, out, Style(mode=subtitle.CHAT, lines=2),
+                               shift=100.0, window=(100.0, 200.0))
+    layers = [line for line in out.read_text(encoding="utf-8-sig").splitlines()
+              if line.startswith("Dialogue: 0,")]
+
+    assert count == 3
+    assert layers[0].startswith("Dialogue: 0,0:00:00.00,0:00:50.00,")
+    assert "第一条" in layers[0] and "第二条" in layers[0]
+    assert layers[1].startswith("Dialogue: 0,0:00:50.00,0:01:40.00,")
+    assert "第一条" not in layers[1]
+    assert "第二条" in layers[1] and "第三条" in layers[1]
+
+
+def test_聊天流分片没有新消息也会保留旧消息(tmp_path):
+    out = tmp_path / "quiet.ass"
+    count = subtitle.build_ass([ev(90.0, "还在显示")], out,
+                               Style(mode=subtitle.CHAT),
+                               shift=100.0, window=(100.0, 200.0))
+    layers = [line for line in out.read_text(encoding="utf-8-sig").splitlines()
+              if line.startswith("Dialogue: 0,")]
+
+    assert count == 1
+    assert len(layers) == 1
+    assert layers[0].startswith("Dialogue: 0,0:00:00.00,0:01:40.00,")
+    assert "还在显示" in layers[0]
+
+
 def test_没有弹幕时返回零(tmp_path):
     out = tmp_path / "g.ass"
     assert subtitle.build_ass([], out, Style()) == 0
@@ -242,3 +288,95 @@ def test_find_videos_目录不存在不抛(tmp_path):
 def test_find_ffprobe_优先使用内置版本(monkeypatch):
     monkeypatch.setattr(subtitle.runtime, "bundled_ffprobe", lambda: "内置/ffprobe.exe")
     assert subtitle.find_ffprobe("系统/ffmpeg.exe") == "内置/ffprobe.exe"
+
+
+@pytest.mark.parametrize("mode", [subtitle.CHAT, subtitle.SCROLL])
+def test_nonfinite_offsets_are_skipped(tmp_path, mode):
+    events = [ev(t) for t in (float("nan"), float("inf"), -float("inf"), 1)]
+    assert subtitle.build_ass(events, tmp_path / "out.ass", Style(mode=mode)) == 1
+
+
+def test_load_events_skips_wrong_json_shapes(tmp_path):
+    path = tmp_path / "mixed.jsonl"
+    data = [None, [], 42, "string", {"kind": "chat", "content": 12}, ev(1)]
+    path.write_text("\n".join(json.dumps(item) for item in data), encoding="utf-8")
+    assert subtitle.load_events(path) == [ev(1)]
+
+
+@pytest.fixture
+def mux_setup(tmp_path, monkeypatch):
+    jsonl = tmp_path / "events.jsonl"
+    jsonl.write_text(json.dumps(ev(1)), encoding="utf-8")
+    monkeypatch.setattr(subtitle, "probe", lambda *_: {"duration": 10, "width": 320, "height": 180})
+    monkeypatch.setattr(subtitle, "_looks_sane", lambda *_: True)
+
+    def mux(ffmpeg, video, ass, out):
+        out.write_bytes(b"muxed-result")
+        return True
+
+    monkeypatch.setattr(subtitle, "mux", mux)
+    return jsonl
+
+
+@pytest.mark.parametrize("suffix", [".mp4", ".mkv"])
+def test_successful_replacement_keeps_finished_video(tmp_path, mux_setup, suffix):
+    video = tmp_path / ("video" + suffix)
+    video.write_bytes(b"original")
+    result = subtitle.process("ffmpeg", mux_setup, [video])
+    assert result == [video.with_suffix(".mkv")]
+    assert result[0].read_bytes() == b"muxed-result"
+    if suffix != ".mkv":
+        assert not video.exists()
+
+
+@pytest.mark.parametrize("failure", ["rename", "validation", "existing_destination", "mux"])
+def test_failed_replacement_never_deletes_original(tmp_path, monkeypatch, mux_setup, failure):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"original")
+    if failure == "rename":
+        original_replace = Path.replace
+
+        def fail_replace(path, target):
+            if path.stem.endswith("_弹幕版"):
+                raise OSError("模拟文件占用")
+            return original_replace(path, target)
+
+        monkeypatch.setattr(Path, "replace", fail_replace)
+    elif failure == "validation":
+        monkeypatch.setattr(subtitle, "_looks_sane", lambda *_: False)
+    elif failure == "existing_destination":
+        video.with_suffix(".mkv").write_bytes(b"unrelated")
+    else:
+        monkeypatch.setattr(subtitle, "mux", lambda *_: False)
+
+    results = subtitle.process("ffmpeg", mux_setup, [video])
+    assert video.read_bytes() == b"original"
+    if failure == "mux":
+        assert results == []
+    else:
+        assert results[0].read_bytes() == b"muxed-result"
+    if failure == "existing_destination":
+        assert video.with_suffix(".mkv").read_bytes() == b"unrelated"
+
+
+def test_auto_offsets_probe_each_segment_once_and_preserve_style(tmp_path, monkeypatch, mux_setup):
+    videos = [tmp_path / "one.mp4", tmp_path / "two.mp4"]
+    for video in videos:
+        video.write_bytes(b"original")
+    probes, windows = [], []
+
+    def probe(ffmpeg, video):
+        probes.append(video)
+        return {"duration": 10, "width": 320, "height": 180}
+
+    def build(events, ass, style, shift, window):
+        windows.append((shift, window, style.width))
+        return 0
+
+    monkeypatch.setattr(subtitle, "probe", probe)
+    monkeypatch.setattr(subtitle, "build_ass", build)
+    style = Style(width=1920)
+    subtitle.process("ffmpeg", mux_setup, videos, style=style)
+    assert probes == videos
+    assert windows == [(0, (0, 10), 320), (10, (10, 20), 320)]
+    assert style.width == 1920

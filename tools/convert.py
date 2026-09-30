@@ -17,7 +17,7 @@ from xml.sax.saxutils import escape
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dylive import subtitle, video                          # noqa: E402
-from dylive.utils import setup_console, setup_logging       # noqa: E402
+from dylive.utils import clock, setup_console, setup_logging  # noqa: E402
 
 
 def to_xml(events, out: Path) -> int:
@@ -39,9 +39,8 @@ def to_xml(events, out: Path) -> int:
 def to_txt(events, out: Path) -> int:
     with out.open("w", encoding="utf-8") as fh:
         for ev in events:
-            sec = int(max(0.0, float(ev.get("offset", 0))))
-            fh.write("[%02d:%02d:%02d] %s: %s\n"
-                     % (sec // 3600, sec % 3600 // 60, sec % 60,
+            fh.write("[%s] %s: %s\n"
+                     % (clock(float(ev.get("offset", 0))),
                         ev.get("user_name") or "-", ev["content"]))
     return len(events)
 
@@ -65,7 +64,7 @@ def main() -> int:
     p.add_argument("--font", default="", help="字幕字体，留空按当前系统挑")
     p.add_argument("--size", type=int, default=48)
     p.add_argument("--duration", type=float, default=10.0,
-                   help="一条弹幕横穿屏幕的秒数（默认 10）")
+                   help="滚动弹幕横穿屏幕的秒数（默认 10）；单独导出聊天流 ASS 时也是末尾保留时长")
     p.add_argument("--opacity", type=float, default=0.85, help="不透明度 0~1")
     p.add_argument("--style", choices=[subtitle.SCROLL, subtitle.CHAT],
                    default=subtitle.CHAT,

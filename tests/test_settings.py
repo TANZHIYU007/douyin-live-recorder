@@ -5,6 +5,9 @@
 
 import json
 import os
+from dataclasses import asdict
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -156,3 +159,33 @@ def test_事件类型一个都不勾时回落到默认(qapp):
         box.setChecked(False)
     dialog.apply_to(s)
     assert s.kinds                       # 非空
+
+
+@pytest.mark.parametrize("flip", [False, True])
+def test_dialog_roundtrip_preserves_every_setting(qapp, flip):
+    from dylive.ui.settings import SettingsDialog
+
+    values = asdict(AppSettings())
+    values.update(out_dir="custom-output", quality="HD1", container="ts",
+                  segment_minutes=12, kinds=["chat", "gift"], preview_width=960,
+                  preview_fps=10, subtitle_style="scroll", subtitle_size=32,
+                  subtitle_duration=8.0, subtitle_reserve=0.2, subtitle_delay=-1.5,
+                  rooms=["123", "456"], theme="dark")
+    if flip:
+        values = {k: not v if isinstance(v, bool) else v for k, v in values.items()}
+    source = AppSettings(**values)
+    target = AppSettings(rooms=list(source.rooms))
+    dialog = SettingsDialog(source)
+    dialog.apply_to(target)
+    assert asdict(target) == values
+    dialog.close()
+
+
+def test_gui_options_keep_units_and_hidden_defaults(qapp):
+    from dylive.ui.window import MainWindow
+
+    settings = AppSettings(out_dir="custom", segment_minutes=12, headful=True,
+                           kinds=["gift"], embed_subtitle=False)
+    opts = MainWindow._make_options(SimpleNamespace(settings=settings), "456")
+    assert opts == Options(target="456", out_dir=Path("custom"), segment_seconds=720,
+                           headless=False, kinds=("gift",), show_console=False, watch=True)

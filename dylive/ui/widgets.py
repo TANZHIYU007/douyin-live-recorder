@@ -16,6 +16,7 @@ from PySide6.QtGui import (QBrush, QColor, QImage, QPainter, QPainterPath,
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QSizePolicy,
                                QVBoxLayout, QWidget)
 
+from ..utils import clock
 from . import theme
 from .theme import KIND_LABELS
 
@@ -356,8 +357,7 @@ class DanmakuModel(QAbstractTableModel):
 
         if role == Qt.DisplayRole:
             if col == 0:
-                secs = max(0, int(ev.offset))
-                return "%02d:%02d:%02d" % (secs // 3600, secs % 3600 // 60, secs % 60)
+                return clock(ev.offset)
             if col == 1:
                 return KIND_LABELS.get(ev.kind, ev.kind)
             if col == 2:

@@ -13,6 +13,7 @@ import logging
 import sys
 import threading
 from collections import deque
+from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -30,11 +31,12 @@ from .. import room as room_mod
 from .. import paths, runtime, subtitle, video
 from ..manager import PROCESSING, RECORDING, RoomManager
 from ..recorder import Options
-from ..utils import (UA, add_rotating_file_log, log_dir,
+from ..utils import (UA, add_rotating_file_log, clock, log_dir,
                      quiet_noisy_loggers, setup_console)
+from ..utils import human_size as _human
 from . import theme
 from .first_run import ensure_runtime
-from .icons import app_icon, app_pixmap
+from .icons import app_icon
 from .preview_feed import PreviewFeed
 from .settings import AppSettings, SettingsDialog
 from .tray import Tray
@@ -175,25 +177,14 @@ class MainWindow(QMainWindow):
 
     def _make_options(self, web_rid: str) -> Options:
         s = self.settings
-        return Options(
+        return Options.from_mapping(
+            asdict(s),
             target=web_rid,
             out_dir=Path(s.out_dir),
-            quality=s.quality,
-            container=s.container,
             segment_seconds=s.segment_minutes * 60,
-            record_video=s.record_video,
-            record_danmaku=s.record_danmaku,
             kinds=tuple(s.kinds),
-            write_xml=s.write_xml,
             show_console=False,
             headless=not s.headful,
-            embed_subtitle=s.embed_subtitle,
-            subtitle_replace=s.subtitle_replace,
-            subtitle_style=s.subtitle_style,
-            subtitle_size=s.subtitle_size,
-            subtitle_duration=s.subtitle_duration,
-            subtitle_reserve=s.subtitle_reserve,
-            subtitle_delay=s.subtitle_delay,
             watch=True,                 # 监测列表天然就是守候模式
         )
 
@@ -224,28 +215,16 @@ class MainWindow(QMainWindow):
     def _build_topbar(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName("topbar")
-        bar.setFixedHeight(70)
+        bar.setFixedHeight(66)
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(18, 0, 18, 0)
+        lay.setContentsMargins(20, 0, 18, 0)
         lay.setSpacing(10)
 
-        mark = QLabel()
-        mark.setObjectName("brandIcon")
-        mark.setFixedSize(42, 42)
-        mark.setAlignment(Qt.AlignCenter)
-        mark.setPixmap(app_pixmap(42))
-        lay.addWidget(mark)
-
-        brand = QVBoxLayout()
-        brand.setSpacing(0)
         name = QLabel(APP_NAME)
         name.setObjectName("brandName")
-        sub = QLabel("画面 + 弹幕同步录制")
-        sub.setObjectName("brandSub")
-        brand.addWidget(name)
-        brand.addWidget(sub)
-        lay.addLayout(brand)
-        lay.addSpacing(18)
+        name.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        name.setFixedWidth(136)
+        lay.addWidget(name)
 
         self.input = QLineEdit()
         self.input.setPlaceholderText("直播间号 / https://live.douyin.com/… / v.douyin.com 短链")
@@ -882,13 +861,9 @@ class MainWindow(QMainWindow):
                 recording += 1
             total += st.total_bytes
 
-            if entry.info is not None and not row.name.text().strip("—"):
-                pass
             bits = []
             if state == RECORDING:
-                secs = int(st.elapsed)
-                bits.append("%02d:%02d:%02d" % (secs // 3600, secs % 3600 // 60,
-                                                secs % 60))
+                bits.append(clock(st.elapsed))
                 bits.append(_human(st.total_bytes))
             elif st.post:
                 bits.append(st.post[:30])
@@ -938,9 +913,7 @@ class MainWindow(QMainWindow):
             self._log("【开播】%s 开始录制" % name)
         elif before == RECORDING:
             elapsed, size = self._last_take.pop(rid, (0.0, 0))
-            secs = int(elapsed)
-            detail = "本场 %02d:%02d:%02d，%s" % (
-                secs // 3600, secs % 3600 // 60, secs % 60, _human(size))
+            detail = "本场 %s，%s" % (clock(elapsed), _human(size))
             if state == PROCESSING:
                 self.tray.notify("录完了 · %s" % name, detail + "，正在封装弹幕字幕…")
             else:
@@ -985,9 +958,7 @@ class MainWindow(QMainWindow):
         else:
             set_pill(self.header.pill, entry.state)
 
-        secs = int(st.elapsed)
-        self.tile_time.set_value("%02d:%02d:%02d"
-                                 % (secs // 3600, secs % 3600 // 60, secs % 60))
+        self.tile_time.set_value(clock(st.elapsed))
         self.tile_size.set_value(_human(st.total_bytes))
         self.tile_chat.set_value(str(st.counts.get("chat", 0)
                                      + st.counts.get("emoji", 0)))
@@ -1043,11 +1014,7 @@ class MainWindow(QMainWindow):
         try:
             results = subtitle.process(
                 ffmpeg, jsonl, videos,
-                style=subtitle.Style(mode=s.subtitle_style,
-                                     size=s.subtitle_size,
-                                     duration=s.subtitle_duration,
-                                     reserve=s.subtitle_reserve,
-                                     delay=s.subtitle_delay),
+                style=subtitle.Style.from_options(s),
                 replace=s.subtitle_replace,
                 progress=self.bridge.subtitle_log.emit)
         except Exception as exc:            # noqa: BLE001 - 报给界面
@@ -1117,12 +1084,6 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.quit()
-
-
-def _human(num: int) -> str:
-    if num >= 1 << 30:
-        return "%.2f GB" % (num / (1 << 30))
-    return "%.1f MB" % (num / (1 << 20))
 
 
 def main(argv: Optional[List[str]] = None) -> int:

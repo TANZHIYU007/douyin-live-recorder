@@ -33,18 +33,18 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=__doc__.split("用法示例：", 1)[-1],
     )
     p.add_argument("target", help="直播间号 / 直播间链接 / v.douyin.com 短链")
-    p.add_argument("-o", "--out", type=Path, default=Path("output"),
+    p.add_argument("-o", "--out", dest="out_dir", type=Path, default=Path("output"),
                    help="输出目录（默认 output）")
     p.add_argument("--info", action="store_true", help="只打印直播间信息就退出")
 
     g = p.add_argument_group("录制内容")
-    g.add_argument("--no-video", action="store_true", help="不录画面，只收弹幕")
-    g.add_argument("--no-danmaku", action="store_true", help="不收弹幕，只录画面")
-    g.add_argument("--kinds", default=",".join(DEFAULT_KINDS),
+    g.add_argument("--no-video", dest="record_video", action="store_false", help="不录画面，只收弹幕")
+    g.add_argument("--no-danmaku", dest="record_danmaku", action="store_false", help="不收弹幕，只录画面")
+    g.add_argument("--kinds", type=parse_kinds, default=DEFAULT_KINDS,
                    help="要记录的事件类型，逗号分隔；可选：%s；all 表示全要"
                         % ",".join(ALL_KINDS))
-    g.add_argument("--no-xml", action="store_true", help="不生成 B 站格式 XML")
-    g.add_argument("--quiet-danmaku", action="store_true", help="不在终端实时打印弹幕")
+    g.add_argument("--no-xml", dest="write_xml", action="store_false", help="不生成 B 站格式 XML")
+    g.add_argument("--quiet-danmaku", dest="show_console", action="store_false", help="不在终端实时打印弹幕")
 
     g = p.add_argument_group("画面")
     g.add_argument("-q", "--quality", default="origin",
@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("-f", "--format", dest="container",
                    choices=["mp4", "flv", "ts", "mkv"], default="mp4",
                    help="输出容器（默认 mp4，分片写入，中途断电也能播）")
-    g.add_argument("--segment", type=int, default=0, metavar="秒",
+    g.add_argument("--segment", dest="segment_seconds", type=int, default=0, metavar="秒",
                    help="按时长自动分片，0 表示不分（例如 3600 每小时一个文件）")
     g.add_argument("--ffmpeg", default="", help="ffmpeg 可执行文件路径")
 
@@ -62,9 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--engine", choices=["browser", "native"], default="browser",
                    help="browser=后台开 Chromium 旁听（默认，抗风控）；"
                         "native=直连 WebSocket（省资源，需要 assets/sign.js）")
-    g.add_argument("--headful", action="store_true",
+    g.add_argument("--headful", dest="headless", action="store_false",
                    help="显示浏览器窗口，被风控挡住时可用它手动过验证")
-    g.add_argument("--no-block-media", action="store_true",
+    g.add_argument("--no-block-media", dest="block_media", action="store_false",
                    help="不拦截浏览器里的视频/图片（默认拦截以省资源）")
     g.add_argument("--user-data-dir", default="",
                    help="Chromium 用户目录，用来保留登录态")
@@ -72,29 +72,29 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--proxy", default="", help="代理，如 http://127.0.0.1:7890")
 
     g = p.add_argument_group("弹幕字幕")
-    g.add_argument("--embed", action="store_true",
+    g.add_argument("--embed", dest="embed_subtitle", action="store_true",
                    help="录完把弹幕做成 ASS 并作为软字幕封进视频（输出 mkv，不重编码）")
-    g.add_argument("--keep-original", action="store_true",
+    g.add_argument("--keep-original", dest="subtitle_replace", action="store_false",
                    help="配合 --embed：封装成功后保留原始视频，默认校验通过就删掉")
     g.add_argument("--subtitle-style", choices=[subtitle.CHAT, subtitle.SCROLL],
                    default=subtitle.CHAT,
                    help="chat 左下角聊天流（默认，像直播间）/ scroll 滚动弹幕")
     g.add_argument("--subtitle-size", type=int, default=48, help="字幕字号（默认 48）")
     g.add_argument("--subtitle-duration", type=float, default=10.0, metavar="秒",
-                   help="滚动：横穿屏幕的秒数；聊天流：一条最多停留多久（默认 10）")
+                   help="滚动弹幕横穿屏幕的秒数，聊天流不按时间消失（默认 10）")
     g.add_argument("--subtitle-reserve", type=float, default=0.4,
                    help="滚动样式：屏幕下方留白比例，避免挡住主播（默认 0.4）")
-    g.add_argument("--danmaku-delay", type=float, default=0.0, metavar="秒",
+    g.add_argument("--danmaku-delay", dest="subtitle_delay", type=float, default=0.0, metavar="秒",
                    help="弹幕整体往后推的秒数，抵掉直播流比弹幕慢的那几秒。"
                         "字幕比画面早就调大，晚了填负数（默认 0）")
 
     g = p.add_argument_group("守候与重试")
     g.add_argument("-w", "--watch", action="store_true",
                    help="未开播时守候，开播自动开录，下播后继续守候")
-    g.add_argument("--poll", type=int, default=60, help="守候轮询间隔秒数（默认 60）")
-    g.add_argument("--check", type=int, default=30,
+    g.add_argument("--poll", dest="poll_interval", type=int, default=60, help="守候轮询间隔秒数（默认 60）")
+    g.add_argument("--check", dest="check_interval", type=int, default=30,
                    help="录制中确认是否仍在播的间隔秒数（默认 30）")
-    g.add_argument("--retry", type=int, default=10, help="断流重试间隔秒数（默认 10）")
+    g.add_argument("--retry", dest="retry_delay", type=int, default=10, help="断流重试间隔秒数（默认 10）")
 
     p.add_argument("--log-level", default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(args.log_level, args.log_file)
     log = logging.getLogger("main")
 
-    if args.no_video and args.no_danmaku:
+    if not args.record_video and not args.record_danmaku:
         log.error("--no-video 和 --no-danmaku 不能同时用，那样什么都不会录。")
         return 2
 
@@ -132,37 +132,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("  %-4s %-10s %s" % (label, quality, url))
         return 0 if info.living else 1
 
-    opts = Options(
-        target=args.target,
-        out_dir=args.out,
-        engine=args.engine,
-        quality=args.quality,
-        prefer=args.prefer,
-        container=args.container,
-        segment_seconds=args.segment,
-        record_video=not args.no_video,
-        record_danmaku=not args.no_danmaku,
-        kinds=parse_kinds(args.kinds),
-        write_xml=not args.no_xml,
-        show_console=not args.quiet_danmaku,
-        ffmpeg=args.ffmpeg,
-        headless=not args.headful,
-        block_media=not args.no_block_media,
-        user_data_dir=args.user_data_dir,
-        cookie=args.cookie,
-        proxy=args.proxy,
-        watch=args.watch,
-        poll_interval=args.poll,
-        check_interval=args.check,
-        retry_delay=args.retry,
-        embed_subtitle=args.embed,
-        subtitle_replace=not args.keep_original,
-        subtitle_style=args.subtitle_style,
-        subtitle_size=args.subtitle_size,
-        subtitle_duration=args.subtitle_duration,
-        subtitle_reserve=args.subtitle_reserve,
-        subtitle_delay=args.danmaku_delay,
-    )
+    opts = Options.from_mapping(vars(args))
 
     try:
         rec = Recorder(opts)

@@ -14,6 +14,7 @@ from typing import Iterable, List, Optional
 from xml.sax.saxutils import escape
 
 from .messages import Event
+from .utils import clock as _clock
 
 log = logging.getLogger("writer")
 
@@ -109,11 +110,6 @@ class ConsoleWriter(Writer):
 
     def close(self) -> None:
         pass
-
-
-def _clock(seconds: float) -> str:
-    seconds = max(0, int(seconds))
-    return "%02d:%02d:%02d" % (seconds // 3600, seconds % 3600 // 60, seconds % 60)
 
 
 class WriterGroup:

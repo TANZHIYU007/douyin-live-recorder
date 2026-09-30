@@ -78,7 +78,7 @@ class AppSettings:
     subtitle_replace: bool = True       # 封装成功后用 mkv 替换原视频
     subtitle_style: str = "chat"        # chat 左下角聊天流 / scroll 滚动弹幕
     subtitle_size: int = 48
-    subtitle_duration: float = 10.0
+    subtitle_duration: float = 10.0      # 仅滚动样式使用
     subtitle_reserve: float = 0.4
     subtitle_delay: float = 0.0         # 弹幕整体后推的秒数，抵掉拉流延迟
     verbose_log: bool = False           # 日志文件里记到 DEBUG
@@ -164,6 +164,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("录制设置")
         self._settings = settings
+        self._checks: dict[str, QCheckBox] = {}
         self._environment_reporter = _EnvironmentReporter(self)
         self._environment_reporter.done.connect(self._environment_checked)
 
@@ -193,10 +194,7 @@ class SettingsDialog(QDialog):
         out_row = _row([(self.out_edit, 1), (browse, 0)])
         card.body.addWidget(Field("输出目录", out_row, stretch=1))
 
-        self.quality = QComboBox()
-        self.quality.addItems([label for label, _ in QUALITIES])
-        self.quality.setCurrentIndex(
-            next((i for i, (_, v) in enumerate(QUALITIES) if v == settings.quality), 0))
+        self.quality = _combo(QUALITIES, settings.quality)
         self.quality.setToolTip("拿不到指定画质时会自动往下降级")
         self.container = QComboBox()
         self.container.addItems(["mp4", "flv", "ts", "mkv"])
@@ -212,12 +210,9 @@ class SettingsDialog(QDialog):
         self.segment.setValue(settings.segment_minutes)
         card.body.addWidget(Field("自动分片", self.segment))
 
-        self.cb_video = QCheckBox("画面")
-        self.cb_video.setChecked(settings.record_video)
-        self.cb_danmaku = QCheckBox("弹幕")
-        self.cb_danmaku.setChecked(settings.record_danmaku)
-        self.cb_xml = QCheckBox("同时存 XML")
-        self.cb_xml.setChecked(settings.write_xml)
+        self.cb_video = self._checkbox("record_video", "画面")
+        self.cb_danmaku = self._checkbox("record_danmaku", "弹幕")
+        self.cb_xml = self._checkbox("write_xml", "同时存 XML")
         card.body.addWidget(Field("内容", _row([(self.cb_video, 0), (self.cb_danmaku, 0),
                                                (self.cb_xml, 0)], stretch_end=True),
                                   stretch=1))
@@ -238,23 +233,18 @@ class SettingsDialog(QDialog):
         body.addWidget(kinds_card)
 
         sub_card = Card("弹幕字幕")
-        self.cb_embed = QCheckBox("录完自动把弹幕封装成视频里的字幕轨（输出 mkv）")
-        self.cb_embed.setChecked(settings.embed_subtitle)
+        self.cb_embed = self._checkbox("embed_subtitle", "录完自动把弹幕封装成视频里的字幕轨（输出 mkv）")
         self.cb_embed.setToolTip("软字幕，不重新编码、画质无损，播放器里可以随时开关")
-        self.cb_sub_replace = QCheckBox("封装后删除原始视频（校验通过才删，省一半磁盘）")
-        self.cb_sub_replace.setChecked(settings.subtitle_replace)
+        self.cb_sub_replace = self._checkbox("subtitle_replace", "封装后删除原始视频（校验通过才删，省一半磁盘）")
         sub_card.body.addWidget(self.cb_embed)
         sub_card.body.addWidget(self.cb_sub_replace)
 
-        self.sub_style = QComboBox()
-        for label, value in SUBTITLE_STYLES:
-            self.sub_style.addItem(label, value)
-        self.sub_style.setCurrentIndex(
-            next((i for i, (_, v) in enumerate(SUBTITLE_STYLES)
-                  if v == settings.subtitle_style), 0))
+        self.sub_style = _combo(SUBTITLE_STYLES, settings.subtitle_style)
         self.sub_style.setToolTip(
-            "聊天流：画面左下角堆成一列「用户名：内容」，和抖音直播间一个样\n"
+            "聊天流：最新消息留在画面左下角，由后来的弹幕逐条顶走\n"
             "滚动弹幕：一条条从右往左飘过屏幕")
+        self.sub_style.currentIndexChanged.connect(
+            lambda _: self._sync_subtitle_controls())
         sub_card.body.addWidget(Field("弹幕样式", self.sub_style, stretch=1))
 
         self.sub_size = QSpinBox()
@@ -265,11 +255,10 @@ class SettingsDialog(QDialog):
         self.sub_speed.setRange(4, 30)
         self.sub_speed.setSuffix(" 秒")
         self.sub_speed.setValue(int(settings.subtitle_duration))
-        self.sub_speed.setToolTip("滚动样式：一条从右划到左消失的时间\n"
-                                  "聊天流样式：一条最多在屏幕上停留多久")
-        sub_card.body.addWidget(Field("字号 / 时长",
-                                      _row([(self.sub_size, 1), (self.sub_speed, 1)]),
-                                      stretch=1))
+        self.sub_speed.setToolTip("仅滚动样式：一条弹幕从右划到左消失的时间")
+        sub_card.body.addWidget(Field("字号 / 滚动时长",
+                                       _row([(self.sub_size, 1), (self.sub_speed, 1)]),
+                                       stretch=1))
         self.sub_reserve = QSpinBox()
         self.sub_reserve.setRange(0, 80)
         self.sub_reserve.setSuffix(" %")
@@ -294,49 +283,36 @@ class SettingsDialog(QDialog):
         body.addWidget(sub_card)
 
         adv = Card("其他")
-        self.cb_preview = QCheckBox("显示实时画面预览（额外拉一路最低画质，不影响录制）")
-        self.cb_preview.setChecked(settings.preview)
+        self.cb_preview = self._checkbox("preview", "显示实时画面预览（额外拉一路最低画质，不影响录制）")
         adv.body.addWidget(self.cb_preview)
 
-        self.pv_width = QComboBox()
-        for label, value in PREVIEW_WIDTHS:
-            self.pv_width.addItem(label, value)
-        self.pv_width.setCurrentIndex(_nearest(PREVIEW_WIDTHS, settings.preview_width))
+        self.pv_width = _combo(PREVIEW_WIDTHS, settings.preview_width, nearest=True)
         self.pv_width.setToolTip("预览的解码宽度。直播源本身比这窄时按源走，不会放大。")
-        self.pv_fps = QComboBox()
-        for label, value in PREVIEW_FPS:
-            self.pv_fps.addItem(label, value)
-        self.pv_fps.setCurrentIndex(_nearest(PREVIEW_FPS, settings.preview_fps))
+        self.pv_fps = _combo(PREVIEW_FPS, settings.preview_fps, nearest=True)
         self.pv_fps.setToolTip("限帧只省 CPU，不会让画面更清楚；机器吃力时再往下调。")
         adv.body.addWidget(Field("预览清晰度", self.pv_width))
         adv.body.addWidget(Field("预览帧率", self.pv_fps))
         adv.body.addWidget(separator())
 
-        self.cb_tray = QCheckBox("显示系统托盘图标")
-        self.cb_tray.setChecked(settings.tray)
-        self.cb_minimize = QCheckBox("关闭窗口时收进托盘继续录，不退出程序")
-        self.cb_minimize.setChecked(settings.minimize_to_tray)
+        self.cb_tray = self._checkbox("tray", "显示系统托盘图标")
+        self.cb_minimize = self._checkbox("minimize_to_tray", "关闭窗口时收进托盘继续录，不退出程序")
         self.cb_minimize.setToolTip(
             "真正退出请用托盘菜单里的「退出拾光」。")
-        self.cb_notify = QCheckBox("开播和收工时弹系统通知")
-        self.cb_notify.setChecked(settings.notify_live)
+        self.cb_notify = self._checkbox("notify_live", "开播和收工时弹系统通知")
         for w in (self.cb_tray, self.cb_minimize, self.cb_notify):
             adv.body.addWidget(w)
         self.cb_tray.toggled.connect(self._sync_tray_enabled)
         adv.body.addWidget(separator())
 
-        self.cb_verbose = QCheckBox("详细日志（把 DEBUG 也写进日志文件，排查弹幕问题时打开）")
-        self.cb_verbose.setChecked(settings.verbose_log)
+        self.cb_verbose = self._checkbox("verbose_log", "详细日志（把 DEBUG 也写进日志文件，排查弹幕问题时打开）")
         self.cb_verbose.setToolTip(
             "只影响日志**文件**，界面上显示的还是 INFO 及以上。\n"
             "「弹幕一条都收不到」这类问题，有用的信息基本都在 DEBUG 里。")
         adv.body.addWidget(self.cb_verbose)
         adv.body.addWidget(separator())
 
-        self.cb_headful = QCheckBox("显示浏览器窗口（被风控挡住时可用它手动过验证）")
-        self.cb_headful.setChecked(settings.headful)
-        self.cb_login = QCheckBox("保持登录态（登录后弹幕更完整，所有房间共用）")
-        self.cb_login.setChecked(settings.keep_login)
+        self.cb_headful = self._checkbox("headful", "显示浏览器窗口（被风控挡住时可用它手动过验证）")
+        self.cb_login = self._checkbox("keep_login", "保持登录态（登录后弹幕更完整，所有房间共用）")
         for w in (self.cb_headful, self.cb_login):
             adv.body.addWidget(w)
         adv.body.addWidget(separator())
@@ -346,10 +322,8 @@ class SettingsDialog(QDialog):
         body.addWidget(adv)
 
         appearance = Card("界面")
-        self.theme_mode = QComboBox()
-        self.theme_mode.addItem("浅色", "light")
-        self.theme_mode.addItem("深色", "dark")
-        self.theme_mode.setCurrentIndex(0 if settings.theme == "light" else 1)
+        self.theme_mode = _combo([("浅色", "light"), ("深色", "dark")],
+                                 "light" if settings.theme == "light" else "dark")
         appearance.body.addWidget(Field("主题", self.theme_mode))
         body.addWidget(appearance)
 
@@ -382,6 +356,12 @@ class SettingsDialog(QDialog):
         outer.addWidget(foot)
         self._fit_to_screen()
 
+    def _checkbox(self, field: str, text: str) -> QCheckBox:
+        box = QCheckBox(text)
+        box.setChecked(getattr(self._settings, field))
+        self._checks[field] = box
+        return box
+
     def _fit_to_screen(self) -> None:
         """别超出屏幕：内容再多也只是滚动条变长。"""
         screen = self.screen() or QApplication.primaryScreen()
@@ -394,9 +374,14 @@ class SettingsDialog(QDialog):
             w.setEnabled(on)
 
     def _sync_subtitle_enabled(self, on: bool) -> None:
-        for w in (self.cb_sub_replace, self.sub_style, self.sub_size,
-                  self.sub_speed, self.sub_reserve, self.sub_delay):
+        for w in (self.cb_sub_replace, self.sub_style, self.sub_size, self.sub_delay):
             w.setEnabled(on)
+        self._sync_subtitle_controls()
+
+    def _sync_subtitle_controls(self) -> None:
+        scrolling = self.cb_embed.isChecked() and self.sub_style.currentData() == "scroll"
+        self.sub_speed.setEnabled(scrolling)
+        self.sub_reserve.setEnabled(scrolling)
 
     def _pick_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "选择输出目录",
@@ -425,32 +410,30 @@ class SettingsDialog(QDialog):
         box(self, "运行环境检查", report)
 
     def apply_to(self, settings: AppSettings) -> None:
+        for name, box in self._checks.items():
+            setattr(settings, name, box.isChecked())
         settings.out_dir = self.out_edit.text().strip() or settings.out_dir
-        settings.quality = QUALITIES[self.quality.currentIndex()][1]
+        settings.quality = self.quality.currentData()
         settings.container = self.container.currentText()
         settings.segment_minutes = self.segment.value()
-        settings.record_video = self.cb_video.isChecked()
-        settings.record_danmaku = self.cb_danmaku.isChecked()
-        settings.write_xml = self.cb_xml.isChecked()
         settings.kinds = [k for k, b in self.kind_boxes.items() if b.isChecked()] \
             or list(DEFAULT_KINDS)
-        settings.preview = self.cb_preview.isChecked()
         settings.preview_width = self.pv_width.currentData()
         settings.preview_fps = self.pv_fps.currentData()
-        settings.embed_subtitle = self.cb_embed.isChecked()
-        settings.subtitle_replace = self.cb_sub_replace.isChecked()
         settings.subtitle_style = self.sub_style.currentData()
         settings.subtitle_size = self.sub_size.value()
         settings.subtitle_duration = float(self.sub_speed.value())
         settings.subtitle_reserve = self.sub_reserve.value() / 100.0
         settings.subtitle_delay = self.sub_delay.value()
-        settings.tray = self.cb_tray.isChecked()
-        settings.minimize_to_tray = self.cb_minimize.isChecked()
-        settings.notify_live = self.cb_notify.isChecked()
-        settings.verbose_log = self.cb_verbose.isChecked()
-        settings.headful = self.cb_headful.isChecked()
-        settings.keep_login = self.cb_login.isChecked()
         settings.theme = self.theme_mode.currentData()
+
+
+def _combo(options, value, nearest: bool = False) -> QComboBox:
+    box = QComboBox()
+    for label, data in options:
+        box.addItem(label, data)
+    box.setCurrentIndex(_nearest(options, value) if nearest else max(0, box.findData(value)))
+    return box
 
 
 def _row(items, stretch_end: bool = False) -> QWidget:
