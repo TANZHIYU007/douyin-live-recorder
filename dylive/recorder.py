@@ -10,13 +10,13 @@ import logging
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 from . import messages, room, subtitle, video
 from .messages import DEFAULT_KINDS, Event
-from .utils import hms, safe_name, stamp
+from .utils import files_with_prefix, hms, safe_name, stamp
 from .writers import ConsoleWriter, JsonlWriter, Writer, WriterGroup, XmlWriter
 
 log = logging.getLogger("recorder")
@@ -81,6 +81,13 @@ class Options:
     retry_delay: int = 10                   # 断流后重试间隔（秒）
     extra_ffmpeg_args: List[str] = field(default_factory=list)
 
+    @classmethod
+    def from_mapping(cls, values: Mapping, **overrides) -> "Options":
+        """从命令行或界面设置取录制字段；单位和反向开关由入口显式转换。"""
+        options = {f.name: values[f.name] for f in fields(cls) if f.name in values}
+        options.update(overrides)
+        return cls(**options)
+
 
 class Recorder:
     def __init__(self, opts: Options, hub=None):
@@ -129,9 +136,7 @@ class Recorder:
         files: List[Tuple[str, int]] = []
         if prefix is not None:
             try:
-                files = sorted(
-                    (p.name, p.stat().st_size) for p in prefix.parent.iterdir()
-                    if p.is_file() and p.name.startswith(prefix.name))
+                files = [(p.name, p.stat().st_size) for p in files_with_prefix(prefix)]
             except OSError:
                 pass
         return Status(running=recording, waiting=not recording and not self.stopping,
@@ -424,11 +429,7 @@ class Recorder:
         try:
             subtitle.process(
                 self.ffmpeg, jsonl, videos, offsets,
-                style=subtitle.Style(mode=self.opts.subtitle_style,
-                                     size=self.opts.subtitle_size,
-                                     duration=self.opts.subtitle_duration,
-                                     reserve=self.opts.subtitle_reserve,
-                                     delay=self.opts.subtitle_delay),
+                style=subtitle.Style.from_options(self.opts),
                 kinds=self.opts.subtitle_kinds,
                 replace=self.opts.subtitle_replace,
                 progress=note)
@@ -445,8 +446,5 @@ class Recorder:
         detail = "，".join("%s %d" % (k, v) for k, v in self._counter.most_common())
         log.info("本场时长 %s，弹幕事件 %d 条%s",
                  hms(elapsed), total, ("（" + detail + "）") if detail else "")
-        # 前缀匹配而非 glob：标题里的 [ ] 会被 glob 当成字符类
-        produced = sorted(p for p in prefix.parent.iterdir()
-                          if p.is_file() and p.name.startswith(prefix.name))
-        for p in produced:
+        for p in files_with_prefix(prefix):
             log.info("  %s  %.1f MB", p.name, p.stat().st_size / 1048576)

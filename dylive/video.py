@@ -17,7 +17,7 @@ from typing import List, Optional
 
 from . import runtime
 from .paths import NO_WINDOW             # noqa: F401 - 老的导入点，别人还在用
-from .utils import UA
+from .utils import UA, files_with_prefix
 
 log = logging.getLogger("video")
 
@@ -182,8 +182,6 @@ class VideoRecorder:
         会让匹配结果莫名其妙。
         """
         if self.segment_seconds > 0:
-            prefix = self.out.name.split("%")[0]
-            return sorted(p for p in self.out.parent.iterdir()
-                          if p.is_file() and p.name.startswith(prefix)
-                          and p.suffix == self.out.suffix)
+            prefix = self.out.with_name(self.out.name.rsplit("%03d", 1)[0])
+            return [p for p in files_with_prefix(prefix) if p.suffix == self.out.suffix]
         return [self.out] if self.out.exists() else []

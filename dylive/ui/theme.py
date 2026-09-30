@@ -132,8 +132,7 @@ QToolTip {
     border-bottom: 1px solid %(border)s;
 }
 #brandIcon { background: transparent; }
-#brandName { font-size: 17px; font-weight: 700; letter-spacing: 0.5px; }
-#brandSub  { color: %(muted)s; font-size: 11px; }
+#brandName { font-size: 20px; font-weight: 700; letter-spacing: 1px; }
 
 /* ---------- 输入 ---------- */
 QLineEdit {

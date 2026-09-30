@@ -30,15 +30,15 @@ import uuid
 import zipfile
 from pathlib import Path, PureWindowsPath
 
-from dylive import __version__
+from dylive import __version__, runtime
+from dylive.runtime import MAGIC
+from dylive.utils import human_size as human
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 APP_NAME = "Lumina"
 APP_VERSION = __version__
-
-MAGIC = b"DYLIVEPAYLOAD001"
 
 # 用不到的 Qt 模块，排掉能省下一大截
 QT_EXCLUDES = [
@@ -63,10 +63,6 @@ OTHER_EXCLUDES = ["tkinter", "unittest", "pydoc_data", "test", "PIL", "numpy",
 
 def log(msg: str) -> None:
     print("[build] " + msg, flush=True)
-
-
-def human(num: float) -> str:
-    return "%.1f MB" % (num / 1048576) if num < 1 << 30 else "%.2f GB" % (num / (1 << 30))
 
 
 def _is_below(path: Path, parent: Path) -> bool:
@@ -373,17 +369,10 @@ def append_payload(exe: Path, payload: Path) -> None:
 
 def verify(exe: Path) -> None:
     """用打包好的 exe 自己的逻辑读一遍尾部，确认结构没写错。"""
-    sys.path.insert(0, str(ROOT))
-    from dylive import runtime
-
-    total = exe.stat().st_size
-    with exe.open("rb") as fh:
-        fh.seek(total - runtime.FOOTER_LEN)
-        footer = fh.read(runtime.FOOTER_LEN)
-    if not footer.startswith(MAGIC):
+    info = runtime.read_footer(exe)
+    if info is None:
         raise SystemExit("尾部标记写入失败")
-    size = struct.unpack("<Q", footer[16:24])[0]
-    offset = total - runtime.FOOTER_LEN - size
+    offset, size, _ = info
 
     with runtime._Slice(exe, offset, size) as blob:
         with zipfile.ZipFile(blob) as zf:

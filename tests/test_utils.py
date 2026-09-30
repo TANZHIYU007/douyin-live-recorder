@@ -59,6 +59,20 @@ def test_hms(seconds, expect):
     assert utils.hms(seconds) == expect
 
 
+@pytest.mark.parametrize("seconds,expect", [
+    (-1, "00:00:00"), (1.99, "00:00:01"), (3661, "01:01:01"), (360000, "100:00:00"),
+])
+def test_shared_clock(seconds, expect):
+    assert utils.clock(seconds) == expect
+
+
+@pytest.mark.parametrize("size,expect", [
+    (0, "0.0 MB"), (1 << 20, "1.0 MB"), (1 << 30, "1.00 GB"),
+])
+def test_shared_file_size(size, expect):
+    assert utils.human_size(size) == expect
+
+
 def test_stamp_是可以当文件名的():
     s = utils.stamp(0)
     assert len(s) == 15 and s[8] == "_"

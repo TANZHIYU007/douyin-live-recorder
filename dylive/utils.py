@@ -107,6 +107,25 @@ def stamp(ts: float | None = None) -> str:
 
 def hms(seconds: float) -> str:
     seconds = max(0.0, seconds)
+    return "%s.%02d" % (clock(seconds), int(seconds % 1 * 100))
+
+
+def clock(seconds: float) -> str:
+    """界面、控制台和文本导出统一使用整秒时钟。"""
+    seconds = max(0.0, seconds)
     h, rem = divmod(int(seconds), 3600)
     m, s = divmod(rem, 60)
-    return "%02d:%02d:%02d.%02d" % (h, m, s, int(seconds % 1 * 100))
+    return "%02d:%02d:%02d" % (h, m, s)
+
+
+def human_size(num: float) -> str:
+    return "%.1f MB" % (num / (1 << 20)) if num < 1 << 30 else "%.2f GB" % (num / (1 << 30))
+
+
+def files_with_prefix(prefix: Path) -> list[Path]:
+    """按字面前缀找文件；标题中的 [ ] 等字符不能当成 glob 模式。"""
+    try:
+        return sorted(p for p in prefix.parent.iterdir()
+                      if p.is_file() and p.name.startswith(prefix.name))
+    except OSError:
+        return []

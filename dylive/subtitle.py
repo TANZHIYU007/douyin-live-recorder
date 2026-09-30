@@ -12,17 +12,19 @@ mp4 容器不支持 ASS，所以带字幕的成品统一是 mkv。
 
 from __future__ import annotations
 
-import bisect
 import json
 import logging
+import math
 import shutil
 import subprocess
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, replace as replace_style
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import runtime
 from .paths import NO_WINDOW, subtitle_font
+from .utils import files_with_prefix
 
 log = logging.getLogger("subtitle")
 
@@ -78,7 +80,7 @@ class Style:
     height: int = 1080
     font: str = ""              # 空 = 按当前系统挑一个自带的中文字体
     size: int = 48
-    duration: float = 10.0      # 滚动：横穿屏幕的秒数；聊天流：一条最多停留多久
+    duration: float = 10.0      # 滚动弹幕横穿屏幕的秒数；聊天流不按时间消失
     opacity: float = 0.85
     reserve: float = 0.4        # 滚动样式专用：屏幕下方留白比例，别挡住主播
 
@@ -101,6 +103,13 @@ class Style:
     margin_y: float = 0.08      # 最底下那条距底边的比例
     max_rate: float = 2.5       # 每秒最多显示几条，超了丢（看不过来，也放不下）
 
+    @classmethod
+    def from_options(cls, options) -> "Style":
+        """录后自动封装与界面补做共用同一组字幕选项。"""
+        return cls(mode=options.subtitle_style, size=options.subtitle_size,
+                   duration=options.subtitle_duration, reserve=options.subtitle_reserve,
+                   delay=options.subtitle_delay)
+
 
 # --------------------------------------------------------------------------
 # 读弹幕
@@ -119,7 +128,8 @@ def load_events(jsonl: Path, kinds: Sequence[str] = DEFAULT_KINDS) -> List[dict]
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue            # 录制中途断电可能留半行
-                if ev.get("kind") in wanted and ev.get("content"):
+                if (isinstance(ev, dict) and ev.get("kind") in wanted
+                        and isinstance(ev.get("content"), str) and ev["content"]):
                     out.append(ev)
     except OSError as exc:
         log.warning("读取 %s 失败：%s", jsonl.name, exc)
@@ -162,12 +172,21 @@ def build_ass(events: Iterable[dict], out: Path, style: Optional[Style] = None,
         style_line = STYLE_SCROLL.format(font=font, size=st.size, alpha=alpha)
     head = ASS_HEADER.format(w=st.width, h=st.height, style_line=style_line)
 
+    # 分片开始时，上一片末尾的聊天仍应留在屏幕上，直到后续弹幕将它顶走。
+    if st.mode == CHAT:
+        events = list(events)
     picked = _pick(events, st, shift, window)
-    body = _chat_lines(picked, st) if st.mode == CHAT else _scroll_lines(picked, st)
+    if st.mode == CHAT:
+        initial = _chat_history(events, st, window[0]) if window is not None else []
+        end_at = (window[1] - shift) if window and math.isfinite(window[1]) else None
+        body = _chat_lines(picked, st, initial=initial, end_at=end_at)
+    else:
+        initial = []
+        body = _scroll_lines(picked, st)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(head + "".join(body), encoding="utf-8-sig")
-    return len(picked)
+    return len(picked) + len(initial)
 
 
 def _pick(events, st: Style, shift: float,
@@ -183,6 +202,8 @@ def _pick(events, st: Style, shift: float,
             moment = float(ev.get("offset", 0.0)) + st.delay
         except (TypeError, ValueError):
             continue                # offset 坏了就跳过这一条，不要整场失败
+        if not math.isfinite(moment):
+            continue
         if window is not None and not (window[0] <= moment < window[1]):
             continue
         t = moment - shift
@@ -229,25 +250,40 @@ def _scroll_lines(picked: List[Tuple[float, dict]], st: Style) -> List[str]:
     return lines
 
 
-def _chat_lines(picked: List[Tuple[float, dict]], st: Style) -> List[str]:
+def _chat_history(events: Iterable[dict], st: Style, before: float) -> List[dict]:
+    """取分片起点前仍在聊天栈中的消息，沿用聊天流的限速规则。"""
+    earlier: List[Tuple[float, dict]] = []
+    for ev in events:
+        try:
+            moment = float(ev.get("offset", 0.0)) + st.delay
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(moment) and moment < before:
+            earlier.append((moment, ev))
+    earlier.sort(key=lambda item: item[0])
+
+    recent = deque(maxlen=max(1, st.lines))
+    gap = 1.0 / max(0.1, st.max_rate)
+    last = -float("inf")
+    for moment, ev in earlier:
+        if moment - last >= gap:
+            recent.append(ev)
+            last = moment
+    return list(recent)
+
+
+def _chat_lines(picked: List[Tuple[float, dict]], st: Style,
+                initial: Sequence[dict] = (), end_at: Optional[float] = None) -> List[str]:
     """抖音直播间那种左下角聊天流。
 
-    **整个聊天栈当成一条多行 Dialogue 来写**，每次内容变化重发一次。
-
-    一开始是每条消息在它待过的每一格各写一条，结果事件数是「消息数 × 格数
-    × 2 层」—— 实测热门直播间 3 小时能涨到一百多万条、两百多 MB，ffmpeg 的
-    ass 编码器直接报内存不足（实测 5 万条能过、16 万条就挂）。改成整栈一条
-    之后，事件数只跟消息数走，和格数无关。
-
-    多行文本交给 libass 排版还有个额外好处：它会**给每一行单独画气泡**，
-    正好是抖音那个样子；而且锚点在左下，新消息追加到最后一行时，上面那些
-    会自然被顶上去，不用自己算每行的坐标。
+    每条新弹幕让整栈更新一次；安静时旧弹幕一直留着。每个状态只写底框和
+    文字两条 Dialogue，事件量不会随着停留时间增长。多行文本由 libass
+    排版，每行各画一个气泡；锚点在左下，新消息自然把旧消息顶上去。
     """
     shown = _thin(picked, st)
-    if not shown:
+    if not shown and not initial:
         return []
 
-    times = [t for t, _ in shown]
     x = int(st.width * st.margin_x)
     y = int(st.height * (1.0 - st.margin_y))
     line_h = int(st.size * 1.45)
@@ -256,36 +292,31 @@ def _chat_lines(picked: List[Tuple[float, dict]], st: Style) -> List[str]:
     frac = st.chat_width or (0.62 if st.height > st.width else 0.38)
     max_w = st.width * frac
     name_bgr = _bgr(st.name_color)
-    texts = [_compose(ev, st, max_w, name_bgr) for _, ev in shown]
-
-    # 栈的内容只在「来了新消息」或「最老的过期」这两个时刻变
-    marks = sorted(set(times) | {t + st.duration for t in times})
-    segments: List[Tuple[float, float, int, int]] = []
-    for k, t in enumerate(marks[:-1]):
-        hi = bisect.bisect_right(times, t)
-        lo = max(0, hi - st.lines)
-        while lo < hi and times[lo] + st.duration <= t:
-            lo += 1                             # 顶上过期的先掉出去
-        if lo >= hi:
-            continue
-        if segments and segments[-1][2] == lo and segments[-1][3] == hi:
-            segments[-1] = (segments[-1][0], marks[k + 1], lo, hi)   # 没变就续上
-        else:
-            segments.append((t, marks[k + 1], lo, hi))
+    stack = deque((_compose(ev, st, max_w, name_bgr) for ev in initial),
+                  maxlen=max(1, st.lines))
+    # 分片继承的聊天从 0 秒起显示；随后只在新消息到来时切换状态。
+    states: List[Tuple[float, List[Tuple[str, str]], bool]] = []
+    if stack:
+        states.append((0.0, list(stack), False))
+    for t, ev in shown:
+        stack.append(_compose(ev, st, max_w, name_bgr))
+        states.append((t, list(stack), True))
 
     lines: List[str] = []
-    prev_hi = -1
-    for start, end, lo, hi in segments:
+    for i, (start, content, arrived) in enumerate(states):
+        end = states[i + 1][0] if i + 1 < len(states) else end_at
+        if end is None:
+            # 单独导出 ASS 时不知道视频长度，保留原来的末尾时长兜底。
+            end = start + st.duration
         if end - start < 0.04:
             continue
-        plain = "\\N".join(texts[i][0] for i in range(lo, hi))
-        colored = "\\N".join(texts[i][1] for i in range(lo, hi))
-        if hi > prev_hi:
+        plain = "\\N".join(item[0] for item in content)
+        colored = "\\N".join(item[1] for item in content)
+        if arrived:
             # 有新消息进来：整栈从低一行的位置滑上来，看着就是被顶上去的
             tags = "\\move(%d,%d,%d,%d,0,150)" % (x, y + line_h, x, y)
         else:
             tags = "\\pos(%d,%d)" % (x, y)
-        prev_hi = hi
         a, b = _ass_time(start), _ass_time(end)
         # 底框在下、文字在上，两条用同一组定位标签，动起来才不会分家
         lines.append("Dialogue: 0,%s,%s,DM,,0,0,0,,{%s\\1a&HFF&}%s\n"
@@ -313,7 +344,7 @@ def _thin(picked: List[Tuple[float, dict]], st: Style) -> List[Tuple[float, dict
             kept.append((t, ev))
             last = t
 
-    budget = max(1, MAX_DIALOGUE // 2)          # 一次状态变化写两条
+    budget = max(1, MAX_DIALOGUE // 2 - 1)      # 为分片继承的初始状态留两条
     if len(kept) > budget:
         step = len(kept) / budget
         kept = [kept[int(i * step)] for i in range(budget)]
@@ -424,7 +455,7 @@ def mux(ffmpeg: str, video: Path, ass: Path, out: Path) -> bool:
 
 
 def _looks_sane(ffmpeg: str, source: Path, result: Path, slack: float) -> bool:
-    """删原文件前确认成品是真能播的：体积没缩水、时长没变短、字幕轨在。
+    """删原文件前检查成品体积和时长；这不是完整的解码验证。
 
     只查「没变短」而不是「一模一样」—— 字幕轨要比最后一条弹幕再延续一个弹幕
     时长，容器时长取所有轨道的最大值，所以成品比原视频长几秒是正常的。
@@ -453,13 +484,8 @@ def find_videos(prefix: Path) -> List[Path]:
 
     用前缀匹配而不是 glob：直播间标题里的 [ ] 是 glob 元字符。
     """
-    try:
-        return sorted(p for p in prefix.parent.iterdir()
-                      if p.is_file() and p.name.startswith(prefix.name)
-                      and p.suffix.lower() in VIDEO_SUFFIXES
-                      and not p.stem.endswith("_弹幕版"))
-    except OSError:
-        return []
+    return [p for p in files_with_prefix(prefix)
+            if p.suffix.lower() in VIDEO_SUFFIXES and not p.stem.endswith("_弹幕版")]
 
 
 def process(ffmpeg: str, jsonl: Path, videos: Sequence[Path],
@@ -488,24 +514,18 @@ def process(ffmpeg: str, jsonl: Path, videos: Sequence[Path],
         say("没找到对应的视频文件，跳过")
         return []
 
-    if offsets is None:
-        offsets = []
-        acc = 0.0
-        for path in videos:
-            offsets.append(acc)
-            acc += probe(ffmpeg, path).get("duration", 0.0)
-
+    acc = 0.0
     results: List[Path] = []
     for i, video in enumerate(videos):
         info = probe(ffmpeg, video)
         duration = info.get("duration", 0.0)
-        start = float(offsets[i]) if i < len(offsets) else 0.0
+        start = acc if offsets is None else (float(offsets[i]) if i < len(offsets) else 0.0)
+        acc += duration
         window = (start, start + duration) if duration else (start, float("inf"))
 
         st = style or Style()
         if info.get("width") and info.get("height"):
-            st = Style(**{**st.__dict__,
-                          "width": int(info["width"]), "height": int(info["height"])})
+            st = replace_style(st, width=int(info["width"]), height=int(info["height"]))
 
         ass = video.with_suffix(".ass")
         count = build_ass(events, ass, st, shift=start, window=window)
@@ -527,9 +547,12 @@ def process(ffmpeg: str, jsonl: Path, videos: Sequence[Path],
             if _looks_sane(ffmpeg, video, out, st.duration):
                 final = video.with_suffix(".mkv")
                 try:
-                    video.unlink()
+                    if final != video and final.exists():
+                        raise FileExistsError("目标文件已存在：%s" % final.name)
                     out.replace(final)
                     out = final
+                    if video != final:
+                        video.unlink()
                 except OSError as exc:
                     say("替换原文件失败（保留两份）：%s" % exc)
             else:

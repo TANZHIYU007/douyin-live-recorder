@@ -21,6 +21,10 @@ from dylive.room import RoomInfo
     ("  123456789  ", "123456789"),
     ("https://live.douyin.com/123456789", "123456789"),
     ("https://live.douyin.com/123456789?from=share", "123456789"),
+    ("live.douyin.com/123456789/", "123456789"),
+    ("https://www.douyin.com/123456789", "123456789"),
+    ("https://live.douyin.com/?live_web_rid=214495728391", "214495728391"),
+    ("https://live.douyin.com/?from=share&live_web_rid=214495728391", "214495728391"),
     ("https://www.douyin.com/follow?web_rid=987654321", "987654321"),
     ("https://live.douyin.com/user/xxx?web_rid=555666777", "555666777"),
 ])
@@ -28,10 +32,27 @@ def test_parse_target(target, expect):
     assert room.parse_target(target) == expect
 
 
-@pytest.mark.parametrize("junk", ["", "抖音", "https://example.com/", "abc"])
+@pytest.mark.parametrize("junk", [
+    "", "抖音", "https://example.com/", "abc",
+    "https://example.com/?live_web_rid=214495728391",
+    "https://live.douyin.com.evil.example/214495728391",
+    "https://live.douyin.com/?live_web_rid=not-a-room",
+])
 def test_parse_target_解析不出来就报错(junk):
     with pytest.raises(ValueError):
         room.parse_target(junk)
+
+
+def test_parse_target_短链跳转后识别新版参数():
+    class Session:
+        def get(self, url, **kwargs):
+            assert url == "https://v.douyin.com/short/"
+            assert kwargs["allow_redirects"] is True
+            return type("Response", (), {
+                "url": "https://live.douyin.com/?live_web_rid=214495728391"
+            })()
+
+    assert room.parse_target("v.douyin.com/short/", Session()) == "214495728391"
 
 
 # --------------------------------------------------------------------------
