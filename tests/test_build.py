@@ -64,8 +64,8 @@ def test_windows_载荷规范化_chocolatey_工具名大小写(tmp_path, monkeyp
     with zipfile.ZipFile(payload) as zf:
         names = set(zf.namelist())
 
-    assert runtime.FFMPEG_REL in names
-    assert runtime.FFPROBE_REL in names
+    assert build_exe.PAYLOAD_FFMPEG_REL in names
+    assert build_exe.PAYLOAD_FFPROBE_REL in names
     assert "bin/ffmpeg.EXE" not in names
     assert "bin/ffprobe.EXE" not in names
 
