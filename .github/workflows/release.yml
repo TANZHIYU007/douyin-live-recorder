@@ -17,6 +17,7 @@ jobs:
     runs-on: windows-latest
     env:
       PYTHONUTF8: "1"
+      PYTHONPATH: ${{ github.workspace }}
 
     steps:
       - uses: actions/checkout@v4
