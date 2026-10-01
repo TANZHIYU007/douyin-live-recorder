@@ -47,8 +47,20 @@ jobs:
           choco install ffmpeg -y --no-progress
           where.exe ffmpeg
           where.exe ffprobe
-          ffmpeg -version
-          ffprobe -version
+          $toolsRoot = Join-Path $env:ChocolateyInstall "lib\ffmpeg\tools"
+          $ffmpeg = Get-ChildItem $toolsRoot -Filter ffmpeg.exe -Recurse -File |
+            Select-Object -First 1
+          if (-not $ffmpeg) {
+            throw "Chocolatey 包目录中找不到真实 ffmpeg.exe"
+          }
+          $ffprobe = Join-Path $ffmpeg.DirectoryName "ffprobe.exe"
+          if (-not (Test-Path -LiteralPath $ffprobe -PathType Leaf)) {
+            throw "真实 ffmpeg.exe 同目录中找不到 ffprobe.exe"
+          }
+          "LUMINA_FFMPEG_DIR=$($ffmpeg.DirectoryName)" >> $env:GITHUB_ENV
+          Write-Host "将打包真实工具：$($ffmpeg.FullName)"
+          & $ffmpeg.FullName -version
+          & $ffprobe -version
 
       - name: 构建并验证 Full / Lite
         run: python build_exe.py
