@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Windows Full / Lite
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 校验标签与项目版本
+        shell: python
+        run: |
+          import os
+          from dylive import __version__
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != "v" + __version__:
+              raise SystemExit(f"标签 {tag} 与项目版本 v{__version__} 不一致")
+
+      - name: 安装打包依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[browser,native,gui]" pyinstaller
+          python -m playwright install chromium
+
+      - name: 确认 FFmpeg 环境
+        run: |
+          where.exe ffmpeg
+          where.exe ffprobe
+
+      - name: 构建并验证 Full / Lite
+        run: python build_exe.py
+
+      - name: 生成 SHA-256 校验文件
+        shell: pwsh
+        run: |
+          Get-FileHash dist/Lumina-Full.exe, dist/Lumina-Lite.exe -Algorithm SHA256 |
+            ForEach-Object { "{0}  {1}" -f $_.Hash, (Split-Path $_.Path -Leaf) } |
+            Set-Content -Path dist/SHA256SUMS.txt -Encoding ascii
+
+      - name: 发布 GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            dist/Lumina-Full.exe `
+            dist/Lumina-Lite.exe `
+            dist/SHA256SUMS.txt `
+            --title "拾光 Lumina $env:GITHUB_REF_NAME" `
+            --generate-notes
