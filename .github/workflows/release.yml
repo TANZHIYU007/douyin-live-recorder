@@ -42,10 +42,13 @@ jobs:
           pip install ".[browser,native,gui]" pyinstaller
           python -m playwright install chromium
 
-      - name: 确认 FFmpeg 环境
+      - name: 安装并确认 FFmpeg 环境
         run: |
+          choco install ffmpeg -y --no-progress
           where.exe ffmpeg
           where.exe ffprobe
+          ffmpeg -version
+          ffprobe -version
 
       - name: 构建并验证 Full / Lite
         run: python build_exe.py
