@@ -39,6 +39,8 @@ DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 APP_NAME = "Lumina"
 APP_VERSION = __version__
+PAYLOAD_FFMPEG_REL = "bin/ffmpeg.exe"
+PAYLOAD_FFPROBE_REL = "bin/ffprobe.exe"
 
 # 用不到的 Qt 模块，排掉能省下一大截
 QT_EXCLUDES = [
@@ -336,7 +338,13 @@ def build_payload(chromium: Path, ffmpeg: Path, ffprobe: Path) -> Path:
     files = [(p, "ms-playwright/%s/%s" % (chromium.name,
                                           p.relative_to(chromium).as_posix()))
              for p in chromium.rglob("*") if p.is_file()]
-    for binary in ffmpeg_bundle_files(ffmpeg, ffprobe):
+    media_files = ffmpeg_bundle_files(ffmpeg, ffprobe)
+    # Chocolatey exposes ffmpeg through an ``ffmpeg.EXE`` shim.  ZIP member
+    # names are case-sensitive even on Windows, so keep the two executables in
+    # the exact layout expected by the runtime instead of preserving shim case.
+    files.append((media_files[0], PAYLOAD_FFMPEG_REL))
+    files.append((media_files[1], PAYLOAD_FFPROBE_REL))
+    for binary in media_files[2:]:
         files.append((binary, "bin/" + binary.name))
     raw = sum(p.stat().st_size for p, _ in files)
     log("载荷共 %d 个文件、%s，正在压缩…" % (len(files), human(raw)))
@@ -381,8 +389,8 @@ def verify(exe: Path) -> None:
     if bad:
         raise SystemExit("载荷 zip 校验失败：%s" % bad)
     has_chrome = any(n.endswith("chrome.exe") for n in names)
-    has_ffmpeg = "bin/ffmpeg.exe" in names
-    has_ffprobe = "bin/ffprobe.exe" in names
+    has_ffmpeg = PAYLOAD_FFMPEG_REL in names
+    has_ffprobe = PAYLOAD_FFPROBE_REL in names
     log("校验通过：%d 个条目，chrome.exe=%s ffmpeg.exe=%s ffprobe.exe=%s"
         % (len(names), has_chrome, has_ffmpeg, has_ffprobe))
     if not (has_chrome and has_ffmpeg and has_ffprobe):

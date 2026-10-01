@@ -48,6 +48,28 @@ def test_windows_载荷包含_ffmpeg_和_ffprobe(tmp_path, monkeypatch):
     assert any(name.endswith("chrome.exe") for name in names)
 
 
+def test_windows_载荷规范化_chocolatey_工具名大小写(tmp_path, monkeypatch):
+    chromium = tmp_path / "chromium-1"
+    chromium.mkdir()
+    (chromium / "chrome.exe").write_bytes(b"chrome")
+    ffmpeg = tmp_path / "ffmpeg.EXE"
+    ffprobe = tmp_path / "ffprobe.EXE"
+    ffmpeg.write_bytes(b"ffmpeg")
+    ffprobe.write_bytes(b"ffprobe")
+    build = tmp_path / "build"
+    build.mkdir()
+    monkeypatch.setattr(build_exe, "BUILD", build)
+
+    payload = build_exe.build_payload(chromium, ffmpeg, ffprobe)
+    with zipfile.ZipFile(payload) as zf:
+        names = set(zf.namelist())
+
+    assert build_exe.PAYLOAD_FFMPEG_REL in names
+    assert build_exe.PAYLOAD_FFPROBE_REL in names
+    assert "bin/ffmpeg.EXE" not in names
+    assert "bin/ffprobe.EXE" not in names
+
+
 def test_共享版_dll_进入载荷但_ffplay_不会进入(tmp_path, monkeypatch):
     chromium = tmp_path / "chromium-1"
     chromium.mkdir()
