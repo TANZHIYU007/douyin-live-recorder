@@ -40,6 +40,8 @@ def exercise(window) -> list[str]:
 
     # 输入框：真正发送键盘事件，但不点添加，避免访问任意直播间。
     window.input.clear()
+
+    _check(window.library_btn.isEnabled(), "录像库入口可用", steps)
     window.input.setFocus()
     QTest.keyClicks(window.input, "123456789")
     _check(window.input.text() == "123456789", "直播间输入框可键入", steps)
@@ -113,6 +115,35 @@ def exercise(window) -> list[str]:
     if "error" in dialog_result:
         raise dialog_result["error"]
     _check(bool(dialog_result.get("handled")), "设置对话框可取消关闭", steps)
+
+    library_result: dict[str, object] = {}
+
+    def operate_library() -> None:
+        dialog = app.activeModalWidget()
+        try:
+            _check(dialog is not None, "录像库窗口已打开", steps)
+            _check(dialog.windowTitle() == "录像库与处理队列", "录像库窗口标题正确", steps)
+            library_tabs = dialog.findChild(QTabWidget)
+            _check(library_tabs is not None and library_tabs.count() == 2,
+                   "录像库与处理队列标签存在", steps)
+            for index in range(2):
+                QTest.mouseClick(library_tabs.tabBar(), Qt.LeftButton,
+                                 pos=library_tabs.tabBar().tabRect(index).center())
+                app.processEvents()
+                _check(library_tabs.currentIndex() == index,
+                       "录像库标签页 %d 可点击" % (index + 1), steps)
+            library_result["handled"] = True
+        except Exception as exc:  # noqa: BLE001 - 必须带回外层后让进程失败
+            library_result["error"] = exc
+        finally:
+            if isinstance(dialog, QDialog):
+                dialog.reject()
+
+    QTimer.singleShot(100, operate_library)
+    QTest.mouseClick(window.library_btn, Qt.LeftButton)
+    if "error" in library_result:
+        raise library_result["error"]
+    _check(bool(library_result.get("handled")), "录像库窗口可关闭", steps)
 
     # 空列表下点开始/停止不应崩溃；有用户房间时不触碰，避免意外开录。
     if not window.rows:

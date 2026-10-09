@@ -12,12 +12,15 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple
 
 from . import messages, room, subtitle, video
 from .messages import DEFAULT_KINDS, Event
 from .utils import files_with_prefix, hms, safe_name, stamp
 from .writers import ConsoleWriter, JsonlWriter, Writer, WriterGroup, XmlWriter
+
+if TYPE_CHECKING:
+    from .processing import PostProcessQueue
 
 log = logging.getLogger("recorder")
 
@@ -90,10 +93,12 @@ class Options:
 
 
 class Recorder:
-    def __init__(self, opts: Options, hub=None):
+    def __init__(self, opts: Options, hub=None,
+                 post_queue: Optional["PostProcessQueue"] = None):
         # hub 由多房间管理器注入：所有房间共用一个 Chromium。
         # 不传就自己开一个，命令行单房间走这条路。
         self.hub = hub
+        self.post_queue = post_queue
         self.opts = opts
         self.session = room.make_session(opts.cookie)
         self.web_rid = room.parse_target(opts.target, self.session)
@@ -427,6 +432,16 @@ class Recorder:
 
         note("正在生成弹幕字幕…")
         try:
+            if self.post_queue is not None:
+                task = self.post_queue.enqueue_subtitles(
+                    prefix, jsonl, videos, offsets,
+                    style=subtitle.Style.from_options(self.opts),
+                    kinds=self.opts.subtitle_kinds,
+                    replace=self.opts.subtitle_replace,
+                )
+                log.info("已加入处理队列：%s（任务 %s）", prefix.name, task.id[:8])
+                note("已加入处理队列")
+                return
             subtitle.process(
                 self.ffmpeg, jsonl, videos, offsets,
                 style=subtitle.Style.from_options(self.opts),

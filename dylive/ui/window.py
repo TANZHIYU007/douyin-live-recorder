@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGridLayout,
 from .. import room as room_mod
 from .. import paths, runtime, subtitle, video
 from ..manager import PROCESSING, RECORDING, RoomManager
+from ..processing import PostProcessQueue
 from ..recorder import Options
 from ..utils import (UA, add_rotating_file_log, clock, log_dir,
                      quiet_noisy_loggers, setup_console)
@@ -102,8 +103,6 @@ class Bridge(QObject):
     room_resolved = Signal(str, object)     # web_rid, RoomInfo
     resolve_failed = Signal(str)
     avatar_ready = Signal(str, bytes)
-    subtitle_log = Signal(str)
-    subtitle_done = Signal(int, str)        # 成品数量, 错误信息
 
 
 class MainWindow(QMainWindow):
@@ -120,6 +119,7 @@ class MainWindow(QMainWindow):
         self.log_handler = QueueLogHandler()
         logging.getLogger().addHandler(self.log_handler)
 
+        self.post_queue = PostProcessQueue()
         self.manager = self._make_manager()
         self.selected: Optional[str] = None
         self.rows: Dict[str, RoomRow] = {}
@@ -173,7 +173,7 @@ class MainWindow(QMainWindow):
         if self.settings.keep_login:
             login_dir = str(paths.app_data_dir() / "chrome-data")
         return RoomManager(self._make_options, headless=not self.settings.headful,
-                           user_data_dir=login_dir)
+                           user_data_dir=login_dir, post_queue=self.post_queue)
 
     def _make_options(self, web_rid: str) -> Options:
         s = self.settings
@@ -240,6 +240,10 @@ class MainWindow(QMainWindow):
         self.settings_btn = QPushButton("设置")
         self.settings_btn.setObjectName("ghost")
         lay.addWidget(self.settings_btn)
+
+        self.library_btn = QPushButton("录像库")
+        self.library_btn.setObjectName("ghost")
+        lay.addWidget(self.library_btn)
 
         self.start_all_btn = QPushButton("全部开始")
         self.start_all_btn.setObjectName("primary")
@@ -466,6 +470,7 @@ class MainWindow(QMainWindow):
         self.add_btn.clicked.connect(self._on_add)
         self.input.returnPressed.connect(self._on_add)
         self.settings_btn.clicked.connect(self._open_settings)
+        self.library_btn.clicked.connect(self._open_library)
         self.start_all_btn.clicked.connect(self._start_all)
         self.stop_all_btn.clicked.connect(self._stop_all)
         self.toggle_btn.clicked.connect(self._toggle_selected)
@@ -473,8 +478,6 @@ class MainWindow(QMainWindow):
         self.open_action.triggered.connect(self._open_folder)
         self.log_dir_btn.clicked.connect(self._open_log_folder)
         self.subtitle_action.triggered.connect(self._embed_subtitles)
-        self.bridge.subtitle_log.connect(self._log)
-        self.bridge.subtitle_done.connect(self._on_subtitle_done)
         self.preview_feed.frame.connect(self._on_preview_frame)
         self.room_list.currentItemChanged.connect(self._on_selection)
         self.view_filter.currentIndexChanged.connect(self._apply_view_filter)
@@ -679,6 +682,10 @@ class MainWindow(QMainWindow):
         self._log("正在停止全部房间，等 ffmpeg 收尾…")
 
     # -- 设置与主题 -------------------------------------------------------
+
+    def _open_library(self) -> None:
+        from .library import RecordingLibraryDialog
+        RecordingLibraryDialog(self.settings, self.post_queue, self).exec()
 
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self)
@@ -986,7 +993,7 @@ class MainWindow(QMainWindow):
     # -- 杂项 -------------------------------------------------------------
 
     def _embed_subtitles(self) -> None:
-        """挑一场历史录像的弹幕文件，把它封装成同名视频的字幕轨。"""
+        """挑一场历史录像的弹幕文件，加入持久化处理队列。"""
         picked, _ = QFileDialog.getOpenFileName(
             self, "选择要补做弹幕版的录像（选它的 .jsonl 弹幕文件）",
             self.settings.out_dir, "弹幕记录 (*.jsonl)")
@@ -998,40 +1005,18 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME,
                                 "同目录下没找到对应的视频文件：\n%s*" % jsonl.stem)
             return
-        ffmpeg = self._ensure_ffmpeg()
-        if not ffmpeg:
-            QMessageBox.warning(self, APP_NAME, "找不到 ffmpeg，无法封装。")
-            return
-
-        self.subtitle_action.setEnabled(False)
-        self.subtitle_action.setText("正在补做弹幕版…")
-        self._log("开始补做弹幕版：%s（%d 个片段）" % (jsonl.stem, len(videos)))
-        threading.Thread(target=self._subtitle_worker, args=(ffmpeg, jsonl, videos),
-                         name="ui-subtitle", daemon=True).start()
-
-    def _subtitle_worker(self, ffmpeg: str, jsonl: Path, videos: List[Path]) -> None:
         s = self.settings
         try:
-            results = subtitle.process(
-                ffmpeg, jsonl, videos,
+            task = self.post_queue.enqueue_subtitles(
+                jsonl.with_suffix(""), jsonl, videos,
                 style=subtitle.Style.from_options(s),
                 replace=s.subtitle_replace,
-                progress=self.bridge.subtitle_log.emit)
-        except Exception as exc:            # noqa: BLE001 - 报给界面
-            self.bridge.subtitle_done.emit(0, str(exc))
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, APP_NAME, "加入处理队列失败：\n%s" % exc)
             return
-        self.bridge.subtitle_done.emit(len(results), "")
-
-    def _on_subtitle_done(self, count: int, error: str) -> None:
-        self.subtitle_action.setEnabled(True)
-        self.subtitle_action.setText("补做弹幕版…")
-        if error:
-            self._log("补做失败：%s" % error)
-            QMessageBox.critical(self, APP_NAME, "补做弹幕版失败：\n%s" % error)
-        elif count:
-            self._log("补做完成，生成 %d 个带弹幕的文件。" % count)
-        else:
-            self._log("没有生成文件（可能这场没有聊天弹幕）。")
+        self._log("已加入处理队列：%s（%d 个片段，任务 %s）"
+                  % (jsonl.stem, len(videos), task.id[:8]))
 
     def _open_folder(self) -> None:
         path = Path(self.settings.out_dir)
@@ -1076,7 +1061,10 @@ class MainWindow(QMainWindow):
         self._stop_preview()
         self.settings.save()
         self.tray.hide()
-        self.manager.shutdown(timeout=120)   # 可能正在封装字幕
+        self.manager.shutdown(timeout=120)   # 先让所有录制器正常收尾并把任务入队
+        # 处理队列已持久化。正在处理的任务最多等两秒；来不及结束就由下次
+        # 启动自动恢复，不能为了一个长视频让窗口看起来怎么都关不掉。
+        self.post_queue.shutdown(timeout=2)
         logging.getLogger().removeHandler(self.log_handler)
         event.accept()
         # 托盘模式下 quitOnLastWindowClosed 是关掉的（见 main()），

@@ -233,8 +233,9 @@ class SettingsDialog(QDialog):
         body.addWidget(kinds_card)
 
         sub_card = Card("弹幕字幕")
-        self.cb_embed = self._checkbox("embed_subtitle", "录完自动把弹幕封装成视频里的字幕轨（输出 mkv）")
-        self.cb_embed.setToolTip("软字幕，不重新编码、画质无损，播放器里可以随时开关")
+        self.cb_embed = self._checkbox("embed_subtitle", "录完自动加入字幕处理队列（输出 mkv）")
+        self.cb_embed.setToolTip(
+            "软字幕，不重新编码、画质无损；任务可在「录像库 → 处理队列」查看和重试")
         self.cb_sub_replace = self._checkbox("subtitle_replace", "封装后删除原始视频（校验通过才删，省一半磁盘）")
         sub_card.body.addWidget(self.cb_embed)
         sub_card.body.addWidget(self.cb_sub_replace)
