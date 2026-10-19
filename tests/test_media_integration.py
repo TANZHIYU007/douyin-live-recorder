@@ -13,6 +13,7 @@ import pytest
 
 from dylive import subtitle
 from dylive.paths import NO_WINDOW
+from dylive.processing import COMPLETED, FAILED, PostProcessQueue
 from dylive.video import CONTAINERS, VideoRecorder
 
 
@@ -111,3 +112,50 @@ def test_real_subtitle_mux_and_replacement(media, tmp_path, mode, replace):
     if mode == subtitle.CHAT:
         assert "0:00:00.50,0:00:02.00" in ass
         assert "0:00:02.00,0:00:04.00" in ass
+
+
+def test_real_queue_partial_failure_and_restart_retry(media, tmp_path):
+    ffmpeg, ffprobe, source, _url = media
+    prefix = tmp_path / "20261020_200000_测试"
+    first = prefix.with_suffix(".mp4")
+    second = prefix.with_name(prefix.name + "_part001.mp4")
+    shutil.copyfile(source, first)
+    second.write_bytes(b"broken video")
+    jsonl = prefix.with_suffix(".jsonl")
+    jsonl.write_text("\n".join(json.dumps({"kind": "chat", "content": "测试弹幕", "offset": t})
+                               for t in (0.5, 4.5)), encoding="utf-8")
+    state = tmp_path / "queue.json"
+    queue = PostProcessQueue(state, ffmpeg_provider=lambda: str(ffmpeg))
+    try:
+        task = queue.enqueue_subtitles(prefix, jsonl, [first, second], offsets=[0, 4],
+                                       style=subtitle.Style(mode=subtitle.CHAT, size=16))
+        assert queue.wait_until_idle(20)
+        failed = queue.snapshot()[0]
+        assert failed.status == FAILED
+        assert second.name in failed.error
+        assert "退出码" in failed.error
+        assert failed.results == [str(first.with_suffix(".mkv"))]
+        assert not first.exists()
+        assert second.read_bytes() == b"broken video"
+    finally:
+        queue.shutdown()
+
+    shutil.copyfile(source, second)
+    restored = PostProcessQueue(state, ffmpeg_provider=lambda: str(ffmpeg))
+    try:
+        assert restored.retry(task.id)
+        assert restored.wait_until_idle(20)
+        done = restored.snapshot()[0]
+        assert done.status == COMPLETED
+        assert done.attempts == 2
+        assert len(done.results) == 2
+        for result in done.results:
+            info = inspect_media(ffmpeg, ffprobe, result)
+            assert any(stream["codec_type"] == "subtitle" for stream in info["streams"])
+        text = run(ffmpeg, "-v", "error", "-i", second.with_suffix(".mkv"),
+                   "-map", "0:s:0", "-c:s", "ass", "-f", "ass", "-").decode("utf-8")
+        assert "0:00:00.50" in text
+        assert "0:00:04.50" not in text
+        assert not second.exists()
+    finally:
+        restored.shutdown()

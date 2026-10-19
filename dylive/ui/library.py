@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QFrame, QHeaderView,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import paths, subtitle
-from ..library import RecordingSession, scan_library
+from ..library import RecordingSession, recording_prefix, scan_library
 from ..processing import (COMPLETED, FAILED, PENDING, RUNNING, PostProcessQueue,
                           ProcessingTask)
 from ..utils import human_size
@@ -30,6 +30,10 @@ class RecordingLibraryDialog(QDialog):
         self.settings = settings
         self.queue = queue
         self.sessions: dict[str, RecordingSession] = {}
+        self._scanning = False
+        self._rescan_requested = False
+        self._closed = False
+        self._finished_tasks = self._finished_versions(queue.snapshot())
         self._bridge = _Bridge(self)
         self._bridge.scanned.connect(self._on_scanned)
 
@@ -42,6 +46,7 @@ class RecordingLibraryDialog(QDialog):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh_queue)
         self.timer.start(800)
+        self.finished.connect(self._on_closed)
         self.refresh()
 
     def _build(self) -> None:
@@ -168,6 +173,12 @@ class RecordingLibraryDialog(QDialog):
         self.clear_btn.clicked.connect(self._clear_finished)
 
     def refresh(self) -> None:
+        if self._closed:
+            return
+        if self._scanning:
+            self._rescan_requested = True
+            return
+        self._scanning = True
         self.refresh_btn.setEnabled(False)
         self.refresh_btn.setText("扫描中…")
         root = Path(self.settings.out_dir)
@@ -175,13 +186,27 @@ class RecordingLibraryDialog(QDialog):
                          name="library-scan", daemon=True).start()
 
     def _on_scanned(self, sessions: list[RecordingSession]) -> None:
+        self._scanning = False
+        if self._closed:
+            return
         self.sessions = {session.key: session for session in sessions}
         self.refresh_btn.setEnabled(True)
         self.refresh_btn.setText("刷新")
         self._render_sessions()
+        # 扫描过程中完成的任务可能不在这份快照里，需要再扫一次。
+        if self._rescan_requested:
+            self._rescan_requested = False
+            self.refresh()
         self._refresh_queue()
 
+    def _on_closed(self) -> None:
+        self._closed = True
+        self.timer.stop()
+
     def _render_sessions(self) -> None:
+        selected_row = self.library_table.currentRow()
+        selected_item = self.library_table.item(selected_row, 0) if selected_row >= 0 else None
+        selected_key = selected_item.data(Qt.UserRole) if selected_item else None
         query = self.search.text().strip().casefold()
         rows = [session for session in self.sessions.values()
                 if not query or query in ("%s %s %s" % (
@@ -202,7 +227,8 @@ class RecordingLibraryDialog(QDialog):
                 self.library_table.setItem(row, col, item)
         self.count.setText("%d 场录像" % len(rows))
         if rows:
-            self.library_table.selectRow(0)
+            self.library_table.selectRow(next((i for i, session in enumerate(rows)
+                                               if session.key == selected_key), 0))
         self._sync_buttons()
 
     def _session_status(self, session: RecordingSession) -> str:
@@ -245,7 +271,15 @@ class RecordingLibraryDialog(QDialog):
         session = self._selected_session()
         if not session or not session.videos:
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(session.videos[0].resolve())))
+        # 文件可能刚被后台替换，下一轮扫描尚未送达；播放前按当前目录重新找。
+        videos = subtitle.find_videos(session.prefix) + list(session.videos)
+        current = next((path for path in videos
+                        if recording_prefix(path) == session.prefix and path.is_file()), None)
+        if current is None:
+            self.refresh()
+            QMessageBox.information(self, "拾光", "录像文件已移动或删除，正在刷新录像库。")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(current.resolve())))
 
     def _enqueue(self) -> None:
         session = self._selected_session()
@@ -267,7 +301,15 @@ class RecordingLibraryDialog(QDialog):
         self._refresh_queue(select_id=task.id)
 
     def _refresh_queue(self, select_id: str = "") -> None:
+        if self._closed:
+            return
         tasks = list(reversed(self.queue.snapshot()))
+        finished = self._finished_versions(tasks)
+        files_changed = any(self._finished_tasks.get(key) != value
+                            for key, value in finished.items())
+        self._finished_tasks = finished
+        if files_changed:
+            self.refresh()
         selected = select_id or self._selected_task_id()
         self.queue_table.setRowCount(len(tasks))
         for row, task in enumerate(tasks):
@@ -288,6 +330,11 @@ class RecordingLibraryDialog(QDialog):
             session = self.sessions.get(item.data(Qt.UserRole)) if item else None
             if session:
                 self.library_table.item(row, 5).setText(self._session_status(session))
+
+    @staticmethod
+    def _finished_versions(tasks: list[ProcessingTask]) -> dict[str, tuple]:
+        return {task.id: (task.status, task.attempts, task.updated_at)
+                for task in tasks if task.status in {COMPLETED, FAILED}}
 
     @staticmethod
     def _task_values(task: ProcessingTask) -> list[str]:

@@ -50,6 +50,7 @@ class ProcessingTask:
     message: str = "等待处理"
     error: str = ""
     results: list[str] = field(default_factory=list)
+    processed_videos: list[str] = field(default_factory=list)
     attempts: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -200,7 +201,7 @@ class PostProcessQueue:
                     task, lambda message, key=task_id: self._progress(key, message))
             except Exception as exc:  # noqa: BLE001 - 失败要留在队列里供用户重试
                 log.exception("处理任务失败：%s", task.session_prefix)
-                self._finish(task.id, FAILED, "处理失败", str(exc), [])
+                self._finish(task.id, FAILED, "处理失败", str(exc), list(task.results))
             else:
                 message = "完成，生成 %d 个文件" % len(results) if results else "完成，没有生成新文件"
                 self._finish(task.id, COMPLETED, message, "",
@@ -208,17 +209,45 @@ class PostProcessQueue:
 
     def _process_subtitles(self, task: ProcessingTask,
                            progress: Callable[[str], None]) -> list[Path]:
+        remaining = [i for i, path in enumerate(task.videos)
+                     if path not in task.processed_videos]
+        if not remaining:
+            return [Path(path) for path in task.results]
+        for index in remaining:
+            if not Path(task.videos[index]).is_file():
+                raise subtitle.SubtitleProcessError("找不到视频文件：%s" % task.videos[index])
         ffmpeg = self.ffmpeg_provider()
-        return subtitle.process(
+        if not task.offsets:
+            # 必须在替换任何原文件之前保存整场时间轴，重试时不能从剩余片段重算。
+            offsets = []
+            elapsed = 0.0
+            for path in task.videos:
+                offsets.append(elapsed)
+                elapsed += subtitle.probe(ffmpeg, Path(path)).get("duration", 0.0)
+            with self._condition:
+                task.offsets = offsets
+                self._save_locked()
+
+        def processed(source: Path, result: Optional[Path]) -> None:
+            with self._condition:
+                task.processed_videos.append(str(source))
+                if result is not None:
+                    task.results.append(str(result))
+                task.updated_at = time.time()
+                self._save_locked()
+
+        subtitle.process(
             ffmpeg,
             Path(task.jsonl),
-            [Path(path) for path in task.videos],
-            offsets=task.offsets or None,
+            [Path(task.videos[i]) for i in remaining],
+            offsets=[task.offsets[i] if i < len(task.offsets) else 0.0 for i in remaining],
             style=subtitle.Style(**task.style),
             kinds=task.kinds,
             replace=task.replace,
             progress=progress,
+            on_processed=processed,
         )
+        return [Path(path) for path in task.results]
 
     def _progress(self, task_id: str, message: str) -> None:
         with self._condition:

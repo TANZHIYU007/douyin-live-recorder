@@ -349,12 +349,15 @@ def test_failed_replacement_never_deletes_original(tmp_path, monkeypatch, mux_se
     else:
         monkeypatch.setattr(subtitle, "mux", lambda *_: False)
 
-    results = subtitle.process("ffmpeg", mux_setup, [video])
+    if failure in {"mux", "validation"}:
+        with pytest.raises(subtitle.SubtitleProcessError, match=video.name):
+            subtitle.process("ffmpeg", mux_setup, [video])
+    else:
+        results = subtitle.process("ffmpeg", mux_setup, [video])
+        assert results[0].read_bytes() == b"muxed-result"
     assert video.read_bytes() == b"original"
     if failure == "mux":
-        assert results == []
-    else:
-        assert results[0].read_bytes() == b"muxed-result"
+        assert not (tmp_path / "video_弹幕版.mkv").exists()
     if failure == "existing_destination":
         assert video.with_suffix(".mkv").read_bytes() == b"unrelated"
 
@@ -380,3 +383,16 @@ def test_auto_offsets_probe_each_segment_once_and_preserve_style(tmp_path, monke
     assert probes == videos
     assert windows == [(0, (0, 10), 320), (10, (10, 20), 320)]
     assert style.width == 1920
+
+
+def test_unreadable_danmaku_is_not_treated_as_empty(tmp_path, monkeypatch, mux_setup):
+    original_open = Path.open
+
+    def denied(path, *args, **kwargs):
+        if path == mux_setup:
+            raise PermissionError("模拟权限不足")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", denied)
+    with pytest.raises(subtitle.SubtitleProcessError, match="权限不足"):
+        subtitle.process("unused", mux_setup, [tmp_path / "video.mp4"])

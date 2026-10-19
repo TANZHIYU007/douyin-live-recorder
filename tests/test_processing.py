@@ -5,7 +5,9 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-from dylive import processing
+import pytest
+
+from dylive import processing, subtitle
 from dylive.recorder import Options, Recorder
 
 
@@ -158,3 +160,90 @@ def test_recorder_enqueues_automatic_subtitle_work(tmp_path):
     assert args[:4] == (prefix, jsonl, [source], [1.25])
     assert kwargs["replace"] is True
     assert recorder._post == ""
+
+
+@pytest.mark.parametrize("failure", ["mux", "validation"])
+def test_subtitle_failure_is_retryable_and_keeps_original(tmp_path, monkeypatch, failure):
+    prefix, jsonl, source = _inputs(tmp_path)
+    monkeypatch.setattr(subtitle, "probe", lambda *_: {"duration": 10})
+
+    def mux(_ffmpeg, _video, _ass, out):
+        out.write_bytes(b"result")
+        return failure != "mux"
+
+    monkeypatch.setattr(subtitle, "mux", mux)
+    monkeypatch.setattr(subtitle, "_looks_sane", lambda *_: False)
+    queue = processing.PostProcessQueue(tmp_path / "queue.json",
+                                        ffmpeg_provider=lambda: "unused")
+    try:
+        task = queue.enqueue_subtitles(prefix, jsonl, [source])
+        assert queue.wait_until_idle(3)
+        failed = queue.snapshot()[0]
+        assert failed.status == processing.FAILED
+        assert source.name in failed.error
+        assert source.read_bytes() == b"video"
+        queue.shutdown()
+        assert queue.retry(task.id)
+    finally:
+        queue.shutdown()
+
+
+def test_partial_failure_retries_only_unfinished_segments_after_restart(tmp_path, monkeypatch):
+    prefix, jsonl, first = _inputs(tmp_path)
+    second = prefix.with_name(prefix.name + "_part001.mp4")
+    second.write_bytes(b"second")
+    jsonl.write_text("\n".join(json.dumps({"kind": "chat", "content": "test", "offset": t})
+                               for t in (1, 11)), encoding="utf-8")
+    monkeypatch.setattr(subtitle, "probe", lambda *_: {"duration": 10})
+    monkeypatch.setattr(subtitle, "_looks_sane", lambda *_: True)
+    calls = []
+
+    def mux(_ffmpeg, video, ass, out):
+        calls.append(video)
+        if video == second and calls.count(second) == 1:
+            return False
+        assert "0:00:01.00" in ass.read_text(encoding="utf-8-sig")
+        out.write_bytes(b"finished")
+        return True
+
+    monkeypatch.setattr(subtitle, "mux", mux)
+    state = tmp_path / "queue.json"
+    queue = processing.PostProcessQueue(state, ffmpeg_provider=lambda: "unused")
+    try:
+        task = queue.enqueue_subtitles(prefix, jsonl, [first, second])
+        assert queue.wait_until_idle(3)
+        failed = queue.snapshot()[0]
+        assert failed.status == processing.FAILED
+        assert failed.results == [str(first.with_suffix(".mkv"))]
+        assert not first.exists()
+        assert second.exists()
+    finally:
+        queue.shutdown()
+
+    restored = processing.PostProcessQueue(state, ffmpeg_provider=lambda: "unused")
+    try:
+        assert restored.retry(task.id)
+        assert restored.wait_until_idle(3)
+        done = restored.snapshot()[0]
+        assert done.status == processing.COMPLETED
+        assert done.results == [str(first.with_suffix(".mkv")), str(second.with_suffix(".mkv"))]
+        assert calls == [first, second, second]
+        assert not second.exists()
+    finally:
+        restored.shutdown()
+
+
+def test_empty_danmaku_is_successful_noop(tmp_path):
+    prefix, jsonl, source = _inputs(tmp_path)
+    jsonl.write_text("", encoding="utf-8")
+    queue = processing.PostProcessQueue(tmp_path / "queue.json",
+                                        ffmpeg_provider=lambda: "unused")
+    try:
+        queue.enqueue_subtitles(prefix, jsonl, [source])
+        assert queue.wait_until_idle(3)
+        done = queue.snapshot()[0]
+        assert done.status == processing.COMPLETED
+        assert done.results == []
+        assert source.read_bytes() == b"video"
+    finally:
+        queue.shutdown()
