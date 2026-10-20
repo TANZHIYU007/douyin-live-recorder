@@ -109,7 +109,7 @@ CHECKS = [
 ]
 
 
-def run() -> Tuple[bool, str]:
+def run(*, include_network: bool = True) -> Tuple[bool, str]:
     """跑全部检查，返回 (是否全过, 报告文本)。"""
     lines: List[str] = [
         "拾光 Lumina 环境自检  %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -119,6 +119,9 @@ def run() -> Tuple[bool, str]:
     ]
     all_ok = True
     for name, check in CHECKS:
+        if name == "网络" and not include_network:
+            lines.append("[跳过] 网络     离线检查，不验证抖音连接、风控或实际直播录制")
+            continue
         try:
             ok, detail = check()
         except Exception as exc:        # noqa: BLE001 - 自检本身不能崩
@@ -126,7 +129,7 @@ def run() -> Tuple[bool, str]:
         all_ok &= ok
         lines.append("[%s] %-8s %s" % ("通过" if ok else "失败", name, detail))
     lines.append("-" * 60)
-    lines.append("结论：%s" % ("全部通过，可以正常录制" if all_ok else "存在问题，见上"))
+    lines.append("结论：%s" % ("检查项全部通过" if all_ok else "存在问题，见上"))
 
     text = "\n".join(lines)
     try:

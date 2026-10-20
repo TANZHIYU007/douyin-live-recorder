@@ -122,9 +122,13 @@ def main() -> int:
             print("同目录下没找到 %s* 的视频文件" % base.name)
             return 1
         print("找到 %d 个视频片段，开始封装…" % len(videos))
-        results = subtitle.process(ffmpeg, args.jsonl, videos, style=style,
-                                   kinds=kinds, replace=args.replace,
-                                   progress=lambda m: print("  " + m))
+        try:
+            results = subtitle.process(ffmpeg, args.jsonl, videos, style=style,
+                                       kinds=kinds, replace=args.replace,
+                                       progress=lambda m: print("  " + m))
+        except subtitle.SubtitleProcessError as exc:
+            print("封装失败：%s" % exc)
+            return 1
         for r in results:
             print("  -> %s" % r.name)
     return 0

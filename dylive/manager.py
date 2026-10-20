@@ -58,10 +58,11 @@ class Room:
     """监测列表里的一个房间。"""
 
     def __init__(self, web_rid: str, hub: BrowserHub,
-                 make_options: Callable[[str], Options]):
+                 make_options: Callable[[str], Options], post_queue=None):
         self.web_rid = web_rid
         self.hub = hub
         self.make_options = make_options
+        self.post_queue = post_queue
 
         self.info: Optional[room_mod.RoomInfo] = None
         self.buffer = RoomBuffer()
@@ -130,7 +131,10 @@ class Room:
     def _run(self) -> None:
         try:
             opts = self.make_options(self.web_rid)
-            recorder = Recorder(opts, hub=self.hub)
+            kwargs = {"hub": self.hub}
+            if self.post_queue is not None:
+                kwargs["post_queue"] = self.post_queue
+            recorder = Recorder(opts, **kwargs)
             recorder.extra_writers.append(self.buffer)
             self._recorder = recorder
             self._starting = False
@@ -151,10 +155,11 @@ class Room:
 class RoomManager:
     def __init__(self, make_options: Callable[[str], Options],
                  headless: bool = True, user_data_dir: str = "",
-                 cookie: str = "", proxy: str = ""):
+                 cookie: str = "", proxy: str = "", post_queue=None):
         self.make_options = make_options
         self.hub = BrowserHub(headless=headless, user_data_dir=user_data_dir,
                               cookie=cookie, proxy=proxy)
+        self.post_queue = post_queue
         self._rooms: Dict[str, Room] = {}
         self._lock = threading.Lock()
 
@@ -164,7 +169,7 @@ class RoomManager:
         with self._lock:
             if web_rid in self._rooms:
                 return self._rooms[web_rid]
-            entry = Room(web_rid, self.hub, self.make_options)
+            entry = Room(web_rid, self.hub, self.make_options, self.post_queue)
             self._rooms[web_rid] = entry
             return entry
 

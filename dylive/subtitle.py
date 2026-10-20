@@ -115,7 +115,8 @@ class Style:
 # 读弹幕
 # --------------------------------------------------------------------------
 
-def load_events(jsonl: Path, kinds: Sequence[str] = DEFAULT_KINDS) -> List[dict]:
+def load_events(jsonl: Path, kinds: Sequence[str] = DEFAULT_KINDS,
+                *, strict: bool = False) -> List[dict]:
     wanted = set(kinds)
     out: List[dict] = []
     try:
@@ -132,6 +133,8 @@ def load_events(jsonl: Path, kinds: Sequence[str] = DEFAULT_KINDS) -> List[dict]
                         and isinstance(ev.get("content"), str) and ev["content"]):
                     out.append(ev)
     except OSError as exc:
+        if strict:
+            raise SubtitleProcessError("读取 %s 失败：%s" % (jsonl.name, exc)) from exc
         log.warning("读取 %s 失败：%s", jsonl.name, exc)
     return out
 
@@ -432,6 +435,10 @@ def probe(ffmpeg: str, path: Path) -> Dict[str, float]:
     return info
 
 
+class SubtitleProcessError(RuntimeError):
+    """字幕生成或封装失败；调用方必须保留失败状态供用户处理。"""
+
+
 def mux(ffmpeg: str, video: Path, ass: Path, out: Path) -> bool:
     """把 ASS 作为一条字幕轨封进 mkv，音视频原样搬运不重编码。"""
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
@@ -445,12 +452,11 @@ def mux(ffmpeg: str, video: Path, ass: Path, out: Path) -> bool:
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=3600, **NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as exc:
-        log.warning("封装 %s 失败：%s", video.name, exc)
-        return False
+        raise SubtitleProcessError("封装 %s 失败：%s" % (video.name, exc)) from exc
     if proc.returncode != 0:
-        log.warning("封装 %s 失败：%s", video.name,
-                    proc.stderr.decode("utf-8", "replace").strip()[:300])
-        return False
+        detail = proc.stderr.decode("utf-8", "replace").strip()[-500:]
+        raise SubtitleProcessError("封装 %s 失败（退出码 %d）：%s"
+                                   % (video.name, proc.returncode, detail))
     return True
 
 
@@ -494,21 +500,28 @@ def process(ffmpeg: str, jsonl: Path, videos: Sequence[Path],
             kinds: Sequence[str] = DEFAULT_KINDS,
             replace: bool = True,
             keep_ass: bool = False,
-            progress: Optional[Callable[[str], None]] = None) -> List[Path]:
+            progress: Optional[Callable[[str], None]] = None,
+            on_processed: Optional[Callable[[Path, Optional[Path]], None]] = None) -> List[Path]:
     """给一场录制的每个视频文件配上弹幕字幕。
 
     offsets 是每个视频相对整场开始的秒数；不给就用各文件时长依次累加推算
     （对分片是准的，对断流重连中间的空档会有偏差，所以录制器会把真实值传进来）。
-    返回生成的成品路径。
+    返回生成的成品路径；失败时抛出异常，不把失败当作没有弹幕。
+    每段成功或因无弹幕跳过后调用 on_processed，供队列持久化分片进度。
     """
     def say(msg: str) -> None:
         log.info("%s", msg)
         if progress is not None:
             progress(msg)
 
-    events = load_events(jsonl, kinds)
+    if not jsonl.is_file():
+        raise SubtitleProcessError("找不到弹幕文件：%s" % jsonl)
+    events = load_events(jsonl, kinds, strict=True)
     if not events:
         say("%s 里没有可用弹幕，跳过" % jsonl.name)
+        if on_processed:
+            for video in videos:
+                on_processed(video, None)
         return []
     if not videos:
         say("没找到对应的视频文件，跳过")
@@ -517,6 +530,8 @@ def process(ffmpeg: str, jsonl: Path, videos: Sequence[Path],
     acc = 0.0
     results: List[Path] = []
     for i, video in enumerate(videos):
+        if not video.is_file():
+            raise SubtitleProcessError("找不到视频文件：%s" % video)
         info = probe(ffmpeg, video)
         duration = info.get("duration", 0.0)
         start = acc if offsets is None else (float(offsets[i]) if i < len(offsets) else 0.0)
@@ -532,16 +547,21 @@ def process(ffmpeg: str, jsonl: Path, videos: Sequence[Path],
         if not count:
             say("%s 这一段没有弹幕，跳过" % video.name)
             ass.unlink(missing_ok=True)
+            if on_processed:
+                on_processed(video, None)
             continue
 
         out = video.with_name(video.stem + "_弹幕版.mkv")
         say("正在封装 %s（%d 条弹幕）…" % (video.name, count))
-        ok = mux(ffmpeg, video, ass, out)
-        if not keep_ass:
-            ass.unlink(missing_ok=True)
-        if not ok:
+        try:
+            if not mux(ffmpeg, video, ass, out):
+                raise SubtitleProcessError("封装 %s 失败，原文件已保留" % video.name)
+        except (SubtitleProcessError, OSError):
             out.unlink(missing_ok=True)
-            continue
+            raise
+        finally:
+            if not keep_ass:
+                ass.unlink(missing_ok=True)
 
         if replace:
             if _looks_sane(ffmpeg, video, out, st.duration):
@@ -556,7 +576,10 @@ def process(ffmpeg: str, jsonl: Path, videos: Sequence[Path],
                 except OSError as exc:
                     say("替换原文件失败（保留两份）：%s" % exc)
             else:
-                say("成品校验没过，原文件保留：%s" % out.name)
+                raise SubtitleProcessError("%s 成品校验未通过，原文件和输出文件均已保留"
+                                           % video.name)
         results.append(out)
+        if on_processed:
+            on_processed(video, out)
         say("完成 %s" % out.name)
     return results

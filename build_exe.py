@@ -12,7 +12,7 @@
 PyInstaller 不认识这段数据、不会碰它，程序首次运行自己解压到用户目录，
 之后每次启动只解压 Qt 那一小部分。
 
-产物：dist/Lumina.exe
+产物：dist/Lumina-Lite.exe 和 dist/Lumina-Full.exe
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ QT_EXCLUDES = [
     "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.Qt3DAnimation",
     "PySide6.Qt3DExtras", "PySide6.Qt3DInput", "PySide6.Qt3DLogic",
     "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtGraphs",
-    "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtSpatialAudio",
+    "PySide6.QtSpatialAudio",
     "PySide6.QtBluetooth", "PySide6.QtNfc", "PySide6.QtPositioning",
     "PySide6.QtLocation", "PySide6.QtSensors", "PySide6.QtSerialPort",
     "PySide6.QtSerialBus", "PySide6.QtSql", "PySide6.QtDesigner",
@@ -57,7 +57,6 @@ QT_EXCLUDES = [
     "PySide6.QtRemoteObjects", "PySide6.QtScxml", "PySide6.QtStateMachine",
     "PySide6.QtPdf", "PySide6.QtPdfWidgets", "PySide6.QtTextToSpeech",
     "PySide6.QtWebChannel", "PySide6.QtWebSockets", "PySide6.QtWebView",
-    "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets",
 ]
 OTHER_EXCLUDES = ["tkinter", "unittest", "pydoc_data", "test", "PIL", "numpy",
                   "matplotlib", "pandas", "IPython", "setuptools", "pip"]
@@ -306,6 +305,7 @@ def run_pyinstaller(icon: Path, version_file: Path, output_name: str) -> Path:
     ensure_unlocked(exe)
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
            "--onefile", "--windowed", "--name", output_name,
+           "--distpath", str(DIST),
            "--icon", str(icon),
            "--version-file", str(version_file),
            "--add-data", str(ROOT / "dylive" / "ui" / "assets" / "lumina-icon-v2.png")
@@ -405,10 +405,18 @@ def smoke_test(exe: Path, full: bool = True) -> None:
         env["APPDATA"] = str(Path(tmp) / "Roaming")
         gui_report = Path(tmp) / "gui-smoke.txt"
         env["LUMINA_GUI_SMOKE_REPORT"] = str(gui_report)
+        # 发布构建用合成视频验证打包后的解码与弹幕跳转，不依赖真实直播内容。
+        if not env.get("LUMINA_GUI_SMOKE_MEDIA"):
+            media_bin = env.get("LUMINA_FFMPEG_DIR", "")
+            ffmpeg = str(Path(media_bin) / "ffmpeg.exe") if media_bin else shutil.which("ffmpeg")
+            if ffmpeg:
+                media = Path(tmp) / "replay-smoke.mp4"
+                create_smoke_media(ffmpeg, media)
+                env["LUMINA_GUI_SMOKE_MEDIA"] = str(media)
         checks = [("Qt 界面启动", [str(exe), "--smoke-test-gui"], 180)]
         if full:
             checks.append(
-                ("完整运行环境", [str(exe), "--selftest-headless"], 240))
+                ("内置运行环境（离线）", [str(exe), "--selftest-headless", "--offline"], 240))
         for label, cmd, timeout in checks:
             log("成品自检：%s…" % label)
             try:
@@ -424,6 +432,9 @@ def smoke_test(exe: Path, full: bool = True) -> None:
                 if crash.is_file():
                     detail += "\n崩溃日志：\n" + crash.read_text(
                         encoding="utf-8", errors="replace")[-4000:]
+                report = Path(tmp) / "Lumina" / "selftest.txt"
+                if report.is_file():
+                    detail += "\n环境报告：\n" + report.read_text(encoding="utf-8", errors="replace")[-4000:]
                 raise SystemExit("成品自检失败（%s），退出码 %d%s"
                                  % (label, proc.returncode, detail))
             if label == "Qt 界面启动":
@@ -431,6 +442,18 @@ def smoke_test(exe: Path, full: bool = True) -> None:
                     raise SystemExit("成品自检失败：Qt 交互报告没有生成")
                 log("Qt 交互报告：\n" + gui_report.read_text(encoding="utf-8").rstrip())
         log("成品自检全部通过")
+
+
+def create_smoke_media(ffmpeg: str, target: Path) -> None:
+    result = subprocess.run([
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=15",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100",
+        "-t", "4", "-c:v", "libx264", "-preset", "ultrafast", "-g", "15",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", str(target),
+    ], capture_output=True, timeout=60)
+    if result.returncode != 0 or not target.is_file():
+        raise SystemExit("生成回放测试片失败：" + result.stderr.decode("utf-8", "replace")[-2000:])
 
 
 def main() -> int:

@@ -5,6 +5,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from dylive.ui import smoke
+from dylive.processing import PostProcessQueue
 from dylive.ui.settings import AppSettings
 from dylive.ui.window import MainWindow, fit_window_dimensions
 
@@ -19,7 +20,9 @@ def test_窗口尺寸适配常见与极小工作区():
 
 def test_主窗口真实交互流程(qapp, monkeypatch, tmp_path):
     settings = AppSettings(out_dir=str(tmp_path), tray=False, rooms=[])
+    queue = PostProcessQueue(tmp_path / "processing-queue.json")
     monkeypatch.setattr("dylive.ui.window.AppSettings.load", lambda: settings)
+    monkeypatch.setattr("dylive.ui.window.PostProcessQueue", lambda: queue)
     monkeypatch.setattr(settings, "save", lambda: None)
 
     window = MainWindow()

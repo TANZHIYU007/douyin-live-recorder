@@ -11,7 +11,7 @@ import logging
 import os
 import tempfile
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import List
 
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
 
 from .. import paths, runtime
 from ..messages import DEFAULT_KINDS, KIND_BY_METHOD
+from ..profiles import RECORDING_FIELDS, clean_profiles, clean_recording
 from .theme import KIND_LABELS
 from .widgets import Card, Field, separator
 
@@ -87,10 +88,22 @@ class AppSettings:
     notify_live: bool = True            # 开播/收工弹系统通知
     theme: str = "light"
     rooms: List[str] = field(default_factory=list)
+    room_profiles: dict[str, dict] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.out_dir:
             self.out_dir = str(runtime.default_output_dir())
+
+    def effective_for(self, web_rid: str) -> "AppSettings":
+        values = clean_recording(self.room_profiles.get(web_rid, {}))
+        values["kinds"] = list(values.get("kinds", self.kinds))
+        return replace(self, **values)
+
+    def recording_roots(self) -> list[Path]:
+        roots = [Path(self.out_dir)]
+        roots.extend(Path(p["out_dir"]) for p in clean_profiles(self.room_profiles).values()
+                     if "out_dir" in p)
+        return list(dict.fromkeys(p.resolve() for p in roots))
 
     # -- 落盘 -------------------------------------------------------------
 
@@ -111,6 +124,9 @@ class AppSettings:
         clean = {}
         for key, value in data.items():
             if key not in known:
+                continue
+            if key == "room_profiles":
+                clean[key] = clean_profiles(value)
                 continue
             default = getattr(defaults, key)
             if isinstance(default, bool):
@@ -160,7 +176,7 @@ class AppSettings:
 class SettingsDialog(QDialog):
     """所有房间共用的录制设置。"""
 
-    def __init__(self, settings: AppSettings, parent=None):
+    def __init__(self, settings: AppSettings, parent=None, *, recording_only=False):
         super().__init__(parent)
         self.setWindowTitle("录制设置")
         self._settings = settings
@@ -233,8 +249,9 @@ class SettingsDialog(QDialog):
         body.addWidget(kinds_card)
 
         sub_card = Card("弹幕字幕")
-        self.cb_embed = self._checkbox("embed_subtitle", "录完自动把弹幕封装成视频里的字幕轨（输出 mkv）")
-        self.cb_embed.setToolTip("软字幕，不重新编码、画质无损，播放器里可以随时开关")
+        self.cb_embed = self._checkbox("embed_subtitle", "录完自动加入字幕处理队列（输出 mkv）")
+        self.cb_embed.setToolTip(
+            "软字幕，不重新编码、画质无损；任务可在「录像库 → 处理队列」查看和重试")
         self.cb_sub_replace = self._checkbox("subtitle_replace", "封装后删除原始视频（校验通过才删，省一半磁盘）")
         sub_card.body.addWidget(self.cb_embed)
         sub_card.body.addWidget(self.cb_sub_replace)
@@ -337,6 +354,10 @@ class SettingsDialog(QDialog):
         environment.body.addWidget(self.environment_status)
         environment.body.addWidget(self.environment_check)
         body.addWidget(environment)
+        self.recording_cards = (card, kinds_card, sub_card)
+        if recording_only:
+            for widget in (adv, appearance, environment):
+                widget.hide()
 
         self._sync_subtitle_enabled(settings.embed_subtitle)
         self._sync_tray_enabled(settings.tray)
@@ -426,6 +447,42 @@ class SettingsDialog(QDialog):
         settings.subtitle_reserve = self.sub_reserve.value() / 100.0
         settings.subtitle_delay = self.sub_delay.value()
         settings.theme = self.theme_mode.currentData()
+
+
+class RoomProfileDialog(SettingsDialog):
+    """复用录制选项，不允许主播方案改变共享浏览器、主题或托盘。"""
+
+    def __init__(self, settings: AppSettings, web_rid: str, name: str, parent=None):
+        self.web_rid = web_rid
+        super().__init__(settings.effective_for(web_rid), parent, recording_only=True)
+        self.setWindowTitle("主播录制方案 · " + name)
+        header = QWidget()
+        layout = QVBoxLayout(header)
+        layout.setContentsMargins(20, 14, 20, 0)
+        self.independent = QCheckBox("为此主播使用独立录制设置")
+        self.independent.setChecked(bool(settings.room_profiles.get(web_rid)))
+        layout.addWidget(self.independent)
+        note = QLabel("不勾选时跟随全局设置；勾选后以下参数独立保存。\n"
+                      "保存不打断当前录制，停止此房间后重新开始生效。")
+        note.setObjectName("hint")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.layout().insertWidget(0, header)
+        self.independent.toggled.connect(self._sync_independent)
+        self._sync_independent(self.independent.isChecked())
+
+    def _sync_independent(self, enabled: bool) -> None:
+        for card in self.recording_cards:
+            card.setEnabled(enabled)
+
+    def apply_to(self, settings: AppSettings) -> None:
+        if not self.independent.isChecked():
+            settings.room_profiles.pop(self.web_rid, None)
+            return
+        snapshot = settings.effective_for(self.web_rid)
+        super().apply_to(snapshot)
+        settings.room_profiles[self.web_rid] = clean_recording(
+            {key: getattr(snapshot, key) for key in RECORDING_FIELDS})
 
 
 def _combo(options, value, nearest: bool = False) -> QComboBox:

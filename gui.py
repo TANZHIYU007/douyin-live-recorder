@@ -75,7 +75,7 @@ def _run_selftest() -> int:
     return 0 if ok else 1
 
 
-def _run_selftest_headless() -> int:
+def _run_selftest_headless(*, offline: bool = False) -> int:
     """无界面自检，供发布流水线验证打包成品。"""
     from dylive import runtime
     from dylive.selftest import run as check
@@ -83,7 +83,7 @@ def _run_selftest_headless() -> int:
     try:
         runtime.extract()
         runtime.apply_env()
-        ok, text = check()
+        ok, text = check(include_network=False) if offline else check()
     except Exception:                   # 和正常启动一样，把完整堆栈留在 crash.log
         # 这是给构建/自动诊断用的无界面模式，失败时也不能弹框卡住进程。
         _on_uncaught(*sys.exc_info(), show_dialog=False)
@@ -97,7 +97,7 @@ def main() -> int:
     sys.excepthook = _on_uncaught
     try:
         if "--selftest-headless" in sys.argv:
-            return _run_selftest_headless()
+            return _run_selftest_headless(offline="--offline" in sys.argv)
         if "--selftest" in sys.argv:
             return _run_selftest()
         # --smoke-test-gui 刻意继续走正常启动路径，由 window.main 在界面真正

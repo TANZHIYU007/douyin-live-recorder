@@ -10,14 +10,17 @@ import logging
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple
 
 from . import messages, room, subtitle, video
 from .messages import DEFAULT_KINDS, Event
 from .utils import files_with_prefix, hms, safe_name, stamp
 from .writers import ConsoleWriter, JsonlWriter, Writer, WriterGroup, XmlWriter
+
+if TYPE_CHECKING:
+    from .processing import PostProcessQueue
 
 log = logging.getLogger("recorder")
 
@@ -90,10 +93,12 @@ class Options:
 
 
 class Recorder:
-    def __init__(self, opts: Options, hub=None):
+    def __init__(self, opts: Options, hub=None,
+                 post_queue: Optional["PostProcessQueue"] = None):
         # hub 由多房间管理器注入：所有房间共用一个 Chromium。
         # 不传就自己开一个，命令行单房间走这条路。
         self.hub = hub
+        self.post_queue = post_queue
         self.opts = opts
         self.session = room.make_session(opts.cookie)
         self.web_rid = room.parse_target(opts.target, self.session)
@@ -203,6 +208,9 @@ class Recorder:
         self._ended_by_anchor.clear()
         self._page_info = None
         self._counter.clear()
+        self._runs = []
+        self._session_parts = None
+        self._part_durations = {}
 
         self._start_time = time.time()
         prefix = self._make_prefix(info)
@@ -227,6 +235,7 @@ class Recorder:
                 engine.stop()
             self._writers.close()          # 字幕要读 jsonl，必须等它先落完盘
             self._report(prefix)
+            self._save_replay_metadata(prefix)
             self._embed_subtitles(prefix)
 
     def _make_prefix(self, info: room.RoomInfo) -> Path:
@@ -238,9 +247,9 @@ class Recorder:
     # -- 弹幕 -------------------------------------------------------------
 
     def _start_danmaku(self, info: room.RoomInfo, prefix: Path):
-        self._writers.add(JsonlWriter(prefix.with_suffix(".jsonl")))
+        self._writers.add(JsonlWriter(prefix.with_name(prefix.name + ".jsonl")))
         if self.opts.write_xml:
-            self._writers.add(XmlWriter(prefix.with_suffix(".xml"),
+            self._writers.add(XmlWriter(prefix.with_name(prefix.name + ".xml"),
                                         info.room_id or self.web_rid))
         if self.opts.show_console:
             self._writers.add(ConsoleWriter())
@@ -307,6 +316,9 @@ class Recorder:
                 return
 
             out = prefix if part == 0 else Path(str(prefix) + "_r%d" % part)
+            # VideoRecorder 接受完整文件名；显式补扩展名，避免把标题里的句点
+            # 当成扩展名截断，重连后也不能误覆盖上一段。
+            out = out.with_name(out.name + video.CONTAINERS[self.opts.container][1])
             rec = video.VideoRecorder(
                 self.ffmpeg, url, out,
                 container=self.opts.container,
@@ -400,6 +412,10 @@ class Recorder:
         每一路的零点取 ffmpeg **真的开始写盘**那一刻，不是进程启动那一刻：
         中间那 1~3 秒是连 CDN 和等关键帧，没有画面，算进去字幕就整体偏早。
         """
+        cached = getattr(self, "_session_parts", None)
+        if cached is not None:
+            return cached
+        self._part_durations = {}
         videos: List[Path] = []
         offsets: List[float] = []
         for rec in self._runs:
@@ -407,14 +423,32 @@ class Recorder:
             for path in rec.files():
                 videos.append(path)
                 offsets.append(acc)
-                acc += subtitle.probe(self.ffmpeg, path).get("duration", 0.0)
+                duration = subtitle.probe(self.ffmpeg, path).get("duration", 0.0)
+                self._part_durations[str(path)] = duration
+                acc += duration
+        self._session_parts = videos, offsets
         return videos, offsets
+
+    def _save_replay_metadata(self, prefix: Path) -> None:
+        from .replay import save_metadata
+        try:
+            videos, offsets = self._collect_parts()
+            values = asdict(self.opts)
+            values["out_dir"] = str(self.opts.out_dir)
+            values["kinds"] = list(self.opts.kinds)
+            values["segment_minutes"] = self.opts.segment_seconds // 60
+            save_metadata(prefix, self.web_rid, [
+                {"file": path.name, "start": offset,
+                 "duration": self._part_durations.get(str(path), 0)}
+                for path, offset in zip(videos, offsets, strict=True)], values)
+        except Exception as exc:  # noqa: BLE001 - 辅助时间轴失败不能中断录像收尾
+            log.warning("保存回放时间轴失败：%s", exc)
 
     def _embed_subtitles(self, prefix: Path) -> None:
         if not (self.opts.embed_subtitle and self.opts.record_video
                 and self.opts.record_danmaku):
             return
-        jsonl = prefix.with_suffix(".jsonl")
+        jsonl = prefix.with_name(prefix.name + ".jsonl")
         if not jsonl.is_file():
             return
         videos, offsets = self._collect_parts()
@@ -427,6 +461,16 @@ class Recorder:
 
         note("正在生成弹幕字幕…")
         try:
+            if self.post_queue is not None:
+                task = self.post_queue.enqueue_subtitles(
+                    prefix, jsonl, videos, offsets,
+                    style=subtitle.Style.from_options(self.opts),
+                    kinds=self.opts.subtitle_kinds,
+                    replace=self.opts.subtitle_replace,
+                )
+                log.info("已加入处理队列：%s（任务 %s）", prefix.name, task.id[:8])
+                note("已加入处理队列")
+                return
             subtitle.process(
                 self.ffmpeg, jsonl, videos, offsets,
                 style=subtitle.Style.from_options(self.opts),
