@@ -13,7 +13,7 @@ import logging
 import sys
 import threading
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -39,7 +39,7 @@ from . import theme
 from .first_run import ensure_runtime
 from .icons import app_icon
 from .preview_feed import PreviewFeed
-from .settings import AppSettings, SettingsDialog
+from .settings import AppSettings, RoomProfileDialog, SettingsDialog
 from .tray import Tray
 from .widgets import (Card, DanmakuModel, KindFilter, PreviewView, RoomHeader,
                       RoomRow, StatTile, set_pill)
@@ -176,7 +176,7 @@ class MainWindow(QMainWindow):
                            user_data_dir=login_dir, post_queue=self.post_queue)
 
     def _make_options(self, web_rid: str) -> Options:
-        s = self.settings
+        s = self.settings.effective_for(web_rid)
         return Options.from_mapping(
             asdict(s),
             target=web_rid,
@@ -287,11 +287,14 @@ class MainWindow(QMainWindow):
         self.more_btn.setObjectName("ghost")
         menu = QMenu(self.more_btn)
         self.open_action = QAction("打开录制目录", self)
+        self.profile_action = QAction("此主播的录制方案…", self)
+        self.profile_action.setEnabled(False)
         self.subtitle_action = QAction("补做弹幕版…", self)
         self.subtitle_action.setToolTip(
             "挑一场历史录像的 .jsonl，把弹幕封装成它的字幕轨（不重新编码）")
         self.remove_action = QAction("移除房间", self)
         menu.addAction(self.open_action)
+        menu.addAction(self.profile_action)
         menu.addAction(self.subtitle_action)
         menu.addSeparator()
         menu.addAction(self.remove_action)
@@ -476,6 +479,7 @@ class MainWindow(QMainWindow):
         self.toggle_btn.clicked.connect(self._toggle_selected)
         self.remove_action.triggered.connect(self._remove_selected)
         self.open_action.triggered.connect(self._open_folder)
+        self.profile_action.triggered.connect(self._open_profile)
         self.log_dir_btn.clicked.connect(self._open_log_folder)
         self.subtitle_action.triggered.connect(self._embed_subtitles)
         self.preview_feed.frame.connect(self._on_preview_frame)
@@ -687,6 +691,16 @@ class MainWindow(QMainWindow):
         from .library import RecordingLibraryDialog
         RecordingLibraryDialog(self.settings, self.post_queue, self).exec()
 
+    def _open_profile(self) -> None:
+        entry = self.manager.get(self.selected or "")
+        if entry is None:
+            return
+        dialog = RoomProfileDialog(self.settings, entry.web_rid, entry.display_name(), self)
+        if dialog.exec() == SettingsDialog.Accepted:
+            dialog.apply_to(self.settings)
+            self.settings.save()
+            self._log("%s 的录制方案已保存，停止后重新开始生效。" % entry.display_name())
+
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self)
         if dialog.exec() != SettingsDialog.Accepted:
@@ -882,6 +896,8 @@ class MainWindow(QMainWindow):
             if chats:
                 bits.append("💬 %d" % chats)
             row.update_row(entry.display_name(), state, "  ·  ".join(bits))
+            row.setToolTip("独立录制方案" if entry.web_rid in self.settings.room_profiles
+                           else "跟随全局录制设置")
             self._note_state(entry, state, st)
 
         self.count_label.setText("%d 个房间" % len(self.rows))
@@ -893,6 +909,7 @@ class MainWindow(QMainWindow):
         self.toggle_btn.setText("停止" if (entry and entry.active) else "开始")
         self.toggle_btn.setEnabled(entry is not None)
         self.remove_action.setEnabled(entry is not None)
+        self.profile_action.setEnabled(entry is not None)
 
     def _note_state(self, entry, state: str, st) -> None:
         """认出「开播了」和「收工了」这两个瞬间，该通知就通知。
@@ -996,7 +1013,7 @@ class MainWindow(QMainWindow):
         """挑一场历史录像的弹幕文件，加入持久化处理队列。"""
         picked, _ = QFileDialog.getOpenFileName(
             self, "选择要补做弹幕版的录像（选它的 .jsonl 弹幕文件）",
-            self.settings.out_dir, "弹幕记录 (*.jsonl)")
+            self.settings.effective_for(self.selected or "").out_dir, "弹幕记录 (*.jsonl)")
         if not picked:
             return
         jsonl = Path(picked)
@@ -1005,10 +1022,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME,
                                 "同目录下没找到对应的视频文件：\n%s*" % jsonl.stem)
             return
-        s = self.settings
+        from ..profiles import clean_recording
+        from ..replay import read_metadata, saved_offsets
+        prefix = jsonl.with_suffix("")
+        s = replace(self.settings, **clean_recording(read_metadata(prefix).get("recording")))
         try:
             task = self.post_queue.enqueue_subtitles(
                 jsonl.with_suffix(""), jsonl, videos,
+                saved_offsets(prefix, videos, self.post_queue.latest_for(prefix)),
                 style=subtitle.Style.from_options(s),
                 replace=s.subtitle_replace,
             )
@@ -1019,7 +1040,7 @@ class MainWindow(QMainWindow):
                   % (jsonl.stem, len(videos), task.id[:8]))
 
     def _open_folder(self) -> None:
-        path = Path(self.settings.out_dir)
+        path = Path(self.settings.effective_for(self.selected or "").out_dir)
         path.mkdir(parents=True, exist_ok=True)
         paths.open_in_file_manager(path)
 

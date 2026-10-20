@@ -44,6 +44,8 @@ class RecordingSession:
 
 def recording_prefix(path: Path) -> Path:
     """从某个产出文件还原整场录制共用的前缀。"""
+    if path.name.endswith(".session.json"):
+        return path.with_name(path.name[:-len(".session.json")])
     stem = path.stem
     if stem.endswith("_弹幕版"):
         stem = stem[:-4]
@@ -57,7 +59,7 @@ def _recorded_at(prefix: Path, files: Iterable[Path]) -> float:
         try:
             return datetime.strptime(match.group(1) + match.group(2),
                                      "%Y%m%d%H%M%S").timestamp()
-        except ValueError:
+        except (ValueError, OSError, OverflowError):
             pass
     timestamps = []
     for path in files:
@@ -84,7 +86,8 @@ def scan_library(root: Path) -> list[RecordingSession]:
         candidates = root.rglob("*")
         for path in candidates:
             try:
-                if not path.is_file() or path.suffix.lower() not in KNOWN_SUFFIXES:
+                if (not path.is_file() or (path.suffix.lower() not in KNOWN_SUFFIXES
+                                          and not path.name.endswith(".session.json"))):
                     continue
             except OSError:
                 continue
@@ -98,6 +101,8 @@ def scan_library(root: Path) -> list[RecordingSession]:
         videos = tuple(path for path in files if path.suffix.lower() in VIDEO_SUFFIXES)
         jsonl = next((path for path in files if path.suffix.lower() == ".jsonl"), None)
         xml = next((path for path in files if path.suffix.lower() == ".xml"), None)
+        if all(path.name.endswith(".session.json") for path in files):
+            continue
         size = 0
         for path in files:
             try:

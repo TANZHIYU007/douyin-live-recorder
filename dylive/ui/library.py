@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
@@ -17,11 +18,15 @@ from .. import paths, subtitle
 from ..library import RecordingSession, recording_prefix, scan_library
 from ..processing import (COMPLETED, FAILED, PENDING, RUNNING, PostProcessQueue,
                           ProcessingTask)
+from ..profiles import clean_recording
+from ..replay import read_metadata, saved_offsets, search_sessions
+from ..utils import clock
 from ..utils import human_size
 
 
 class _Bridge(QObject):
     scanned = Signal(object)
+    searched = Signal(int, object, str)
 
 
 class RecordingLibraryDialog(QDialog):
@@ -33,9 +38,13 @@ class RecordingLibraryDialog(QDialog):
         self._scanning = False
         self._rescan_requested = False
         self._closed = False
+        self._search_generation = 0
+        self._search_cancel = threading.Event()
+        self._search_hits = []
         self._finished_tasks = self._finished_versions(queue.snapshot())
         self._bridge = _Bridge(self)
         self._bridge.scanned.connect(self._on_scanned)
+        self._bridge.searched.connect(self._on_searched)
 
         self.setWindowTitle("录像库与处理队列")
         self.resize(1040, 680)
@@ -58,6 +67,11 @@ class RecordingLibraryDialog(QDialog):
         title = QLabel("本地录像库")
         title.setObjectName("nickname")
         self.root_hint = QLabel(str(self.settings.out_dir))
+        roots = self.settings.recording_roots()
+        if len(roots) > 1:
+            self.root_hint.setText("%d 个录制目录（含主播独立目录）" % len(roots))
+        self.root_hint.setTextFormat(Qt.PlainText)
+        self.root_hint.setToolTip("\n".join(map(str, roots)))
         self.root_hint.setObjectName("hint")
         self.root_hint.setTextInteractionFlags(Qt.TextSelectableByMouse)
         top.addWidget(title)
@@ -73,6 +87,7 @@ class RecordingLibraryDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_library_tab(), "录像库")
         self.tabs.addTab(self._build_queue_tab(), "处理队列")
+        self.tabs.addTab(self._build_search_tab(), "弹幕搜索")
         outer.addWidget(self.tabs, 1)
 
     def _build_library_tab(self) -> QWidget:
@@ -107,16 +122,107 @@ class RecordingLibraryDialog(QDialog):
         lay.addWidget(self.library_table, 1)
 
         actions = QHBoxLayout()
-        self.play_btn = QPushButton("播放")
+        self.play_btn = QPushButton("外部播放")
+        self.replay_btn = QPushButton("弹幕同步回放")
         self.open_session_btn = QPushButton("打开所在目录")
         self.queue_btn = QPushButton("加入字幕处理队列")
         self.queue_btn.setObjectName("primary")
         actions.addWidget(self.play_btn)
+        actions.addWidget(self.replay_btn)
         actions.addWidget(self.open_session_btn)
         actions.addStretch(1)
         actions.addWidget(self.queue_btn)
         lay.addLayout(actions)
         return page
+
+    def _build_search_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        tools = QHBoxLayout()
+        self.danmaku_query = QLineEdit()
+        self.danmaku_query.setPlaceholderText("在所有录像中搜索弹幕内容或用户名")
+        self.danmaku_query.setClearButtonEnabled(True)
+        self.danmaku_search_btn = QPushButton("搜索")
+        self.danmaku_cancel_btn = QPushButton("取消搜索")
+        self.danmaku_cancel_btn.setEnabled(False)
+        tools.addWidget(self.danmaku_query, 1)
+        tools.addWidget(self.danmaku_search_btn)
+        tools.addWidget(self.danmaku_cancel_btn)
+        layout.addLayout(tools)
+        self.danmaku_hint = QLabel("支持本软件保存的 JSONL 弹幕；双击结果跳到对应画面。")
+        self.danmaku_hint.setWordWrap(True)
+        layout.addWidget(self.danmaku_hint)
+        self.danmaku_results = QTableWidget(0, 5)
+        self.danmaku_results.setHorizontalHeaderLabels(["主播", "场次", "场内时间", "用户", "内容"])
+        self._prepare_table(self.danmaku_results)
+        self.danmaku_results.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.danmaku_results.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        layout.addWidget(self.danmaku_results, 1)
+        self.danmaku_search_btn.clicked.connect(self._search_danmaku)
+        self.danmaku_query.returnPressed.connect(self._search_danmaku)
+        self.danmaku_cancel_btn.clicked.connect(self._cancel_search)
+        self.danmaku_results.itemDoubleClicked.connect(self._replay_hit)
+        return page
+
+    def _search_danmaku(self) -> None:
+        if self._scanning:
+            self.danmaku_hint.setText("请等录像目录扫描完成后再搜索。")
+            return
+        query = self.danmaku_query.text().strip()
+        if not query:
+            self.danmaku_hint.setText("请输入弹幕内容或用户名。")
+            return
+        self._search_cancel.set()
+        self._search_cancel = threading.Event()
+        self._search_generation += 1
+        self._search_hits = []
+        self.danmaku_results.setRowCount(0)
+        self.danmaku_hint.setText("正在搜索…")
+        self.danmaku_cancel_btn.setEnabled(True)
+        reporter, cancel = self._bridge, self._search_cancel
+        generation, sessions = self._search_generation, list(self.sessions.values())
+
+        def work():
+            hits, note = search_sessions(sessions, query, cancel)
+            if not cancel.is_set():
+                reporter.searched.emit(generation, hits, note)
+
+        threading.Thread(target=work, name="danmaku-search", daemon=True).start()
+
+    def _cancel_search(self) -> None:
+        self._search_cancel.set()
+        self._search_generation += 1
+        self.danmaku_cancel_btn.setEnabled(False)
+        self.danmaku_hint.setText("已取消搜索")
+
+    def _on_searched(self, generation, hits, note) -> None:
+        if self._closed or generation != self._search_generation:
+            return
+        self.danmaku_cancel_btn.setEnabled(False)
+        self._search_hits = hits
+        self.danmaku_results.setRowCount(len(hits))
+        for row, (session, event) in enumerate(hits):
+            for col, value in enumerate((session.streamer, session.prefix.name,
+                                         clock(event.offset), event.user, event.content)):
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                self.danmaku_results.setItem(row, col, item)
+        self.danmaku_hint.setText(note)
+
+    def _replay_hit(self, item) -> None:
+        if 0 <= item.row() < len(self._search_hits):
+            session, event = self._search_hits[item.row()]
+            self._show_replay(session, event.offset)
+
+    def _replay(self) -> None:
+        session = self._selected_session()
+        if session:
+            self._show_replay(session)
+
+    def _show_replay(self, session, offset=None) -> None:
+        from .replay import ReplayDialog
+        ReplayDialog(session, self.queue.latest_for(session.prefix), self,
+                     seek_offset=offset).exec()
 
     def _build_queue_tab(self) -> QWidget:
         page = QFrame()
@@ -165,8 +271,9 @@ class RecordingLibraryDialog(QDialog):
         self.open_root_btn.clicked.connect(self._open_root)
         self.search.textChanged.connect(self._render_sessions)
         self.library_table.itemSelectionChanged.connect(self._sync_buttons)
-        self.library_table.itemDoubleClicked.connect(lambda _item: self._play())
+        self.library_table.itemDoubleClicked.connect(lambda _item: self._replay())
         self.play_btn.clicked.connect(self._play)
+        self.replay_btn.clicked.connect(self._replay)
         self.open_session_btn.clicked.connect(self._open_session)
         self.queue_btn.clicked.connect(self._enqueue)
         self.retry_btn.clicked.connect(self._retry)
@@ -181,9 +288,15 @@ class RecordingLibraryDialog(QDialog):
         self._scanning = True
         self.refresh_btn.setEnabled(False)
         self.refresh_btn.setText("扫描中…")
-        root = Path(self.settings.out_dir)
-        threading.Thread(target=lambda: self._bridge.scanned.emit(scan_library(root)),
-                         name="library-scan", daemon=True).start()
+        roots = self.settings.recording_roots()
+        self.danmaku_search_btn.setEnabled(False)
+
+        def scan():
+            sessions = {s.key: s for root in roots for s in scan_library(root)}
+            self._bridge.scanned.emit(sorted(sessions.values(), key=lambda s: s.recorded_at,
+                                            reverse=True))
+
+        threading.Thread(target=scan, name="library-scan", daemon=True).start()
 
     def _on_scanned(self, sessions: list[RecordingSession]) -> None:
         self._scanning = False
@@ -192,6 +305,7 @@ class RecordingLibraryDialog(QDialog):
         self.sessions = {session.key: session for session in sessions}
         self.refresh_btn.setEnabled(True)
         self.refresh_btn.setText("刷新")
+        self.danmaku_search_btn.setEnabled(True)
         self._render_sessions()
         # 扫描过程中完成的任务可能不在这份快照里，需要再扫一次。
         if self._rescan_requested:
@@ -201,6 +315,7 @@ class RecordingLibraryDialog(QDialog):
 
     def _on_closed(self) -> None:
         self._closed = True
+        self._search_cancel.set()
         self.timer.stop()
 
     def _render_sessions(self) -> None:
@@ -254,6 +369,7 @@ class RecordingLibraryDialog(QDialog):
     def _sync_buttons(self) -> None:
         session = self._selected_session()
         self.play_btn.setEnabled(bool(session and session.videos))
+        self.replay_btn.setEnabled(bool(session and (session.videos or session.jsonl)))
         self.open_session_btn.setEnabled(session is not None)
         self.queue_btn.setEnabled(bool(session and session.jsonl and session.videos))
 
@@ -285,14 +401,18 @@ class RecordingLibraryDialog(QDialog):
         session = self._selected_session()
         if not session or session.jsonl is None:
             return
-        videos = subtitle.find_videos(session.prefix)
+        videos = [p for p in subtitle.find_videos(session.prefix)
+                  if recording_prefix(p) == session.prefix]
+        metadata = read_metadata(session.prefix)
+        settings = replace(self.settings, **clean_recording(metadata.get("recording")))
         try:
             task = self.queue.enqueue_subtitles(
                 session.prefix,
                 session.jsonl,
                 videos,
-                style=subtitle.Style.from_options(self.settings),
-                replace=self.settings.subtitle_replace,
+                saved_offsets(session.prefix, videos, self.queue.latest_for(session.prefix)),
+                style=subtitle.Style.from_options(settings),
+                replace=settings.subtitle_replace,
             )
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "拾光", str(exc))

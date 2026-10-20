@@ -7,6 +7,10 @@
 from __future__ import annotations
 
 import os
+import json
+import shutil
+import tempfile
+import time
 import traceback
 from pathlib import Path
 
@@ -124,9 +128,9 @@ def exercise(window) -> list[str]:
             _check(dialog is not None, "录像库窗口已打开", steps)
             _check(dialog.windowTitle() == "录像库与处理队列", "录像库窗口标题正确", steps)
             library_tabs = dialog.findChild(QTabWidget)
-            _check(library_tabs is not None and library_tabs.count() == 2,
-                   "录像库与处理队列标签存在", steps)
-            for index in range(2):
+            _check(library_tabs is not None and library_tabs.count() == 3,
+                   "录像库、处理队列与弹幕搜索标签存在", steps)
+            for index in range(3):
                 QTest.mouseClick(library_tabs.tabBar(), Qt.LeftButton,
                                  pos=library_tabs.tabBar().tabRect(index).center())
                 app.processEvents()
@@ -145,6 +149,8 @@ def exercise(window) -> list[str]:
         raise library_result["error"]
     _check(bool(library_result.get("handled")), "录像库窗口可关闭", steps)
 
+    _exercise_recording_features(app, steps)
+
     # 空列表下点开始/停止不应崩溃；有用户房间时不触碰，避免意外开录。
     if not window.rows:
         QTest.mouseClick(window.start_all_btn, Qt.LeftButton)
@@ -157,6 +163,62 @@ def exercise(window) -> list[str]:
            "低频操作已收进更多菜单", steps)
 
     return steps
+
+
+def _exercise_recording_features(app, steps):
+    """覆盖独立方案与播放器的打包依赖；合成媒体路径由构建验证环境提供。"""
+    from ..library import scan_library
+    from ..replay import save_metadata
+    from .replay import ReplayDialog
+    from .settings import AppSettings, RoomProfileDialog
+
+    settings = AppSettings()
+    profile = RoomProfileDialog(settings, "123", "测试主播")
+    profile.show()
+    profile.independent.setFocus()
+    QTest.keyClick(profile.independent, Qt.Key_Space)
+    _check(profile.quality.isEnabled(), "独立录制方案可启用", steps)
+    profile.quality.setCurrentIndex(profile.quality.findData("HD1"))
+    profile.apply_to(settings)
+    _check(settings.effective_for("123").quality == "HD1" and settings.quality == "origin",
+           "独立方案不改变全局设置", steps)
+    profile.reject()
+
+    with tempfile.TemporaryDirectory(prefix="lumina-replay-smoke-") as tmp:
+        prefix = Path(tmp) / "20261020_200000_测试回放"
+        prefix.with_suffix(".jsonl").write_text(json.dumps({"offset": .5, "user_name": "用户",
+            "content": "回放测试", "kind": "chat"}), encoding="utf-8")
+        media = os.environ.get("LUMINA_GUI_SMOKE_MEDIA", "")
+        if media:
+            path = prefix.with_suffix(".mp4")
+            shutil.copyfile(media, path)
+            save_metadata(prefix, "123", [{"file": path.name, "start": 0, "duration": 4}], {})
+        dialog = ReplayDialog(scan_library(Path(tmp))[0])
+        frames = []
+        dialog.video.videoSink().videoFrameChanged.connect(lambda frame: frames.append(frame.isValid()))
+        dialog.audio.setMuted(True)
+        dialog.show()
+
+        def wait(predicate):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not predicate():
+                app.processEvents()
+                QTest.qWait(20)
+            return predicate()
+
+        try:
+            _check(wait(lambda: dialog.model.rowCount() == 1), "回放窗口可读取弹幕", steps)
+            dialog.search.setText("用户")
+            app.processEvents()
+            _check(dialog.model.rowCount() == 1, "回放搜索可用", steps)
+            if media:
+                _check(wait(lambda: dialog.player.isSeekable()), "回放视频可定位", steps)
+                dialog.seek_event(.5)
+                _check(wait(lambda: any(frames) and dialog.player.position() >= 500),
+                       "成品播放器可解码视频并按弹幕跳转", steps)
+        finally:
+            dialog.reject()
+        _check(dialog.player.source().isEmpty(), "关闭回放会释放媒体文件", steps)
 
 
 def _write_report(text: str) -> None:

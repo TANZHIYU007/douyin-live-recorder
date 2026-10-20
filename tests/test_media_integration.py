@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -86,6 +87,57 @@ def test_real_recording_all_containers(media, tmp_path, container, segment):
     assert len(files) >= 2 if segment else len(files) == 1
     for path in files:
         inspect_media(ffmpeg, ffprobe, path)
+
+
+def test_real_qt_replay_decodes_seeks_and_advances_segments(media, qapp, tmp_path):
+    from PySide6.QtMultimedia import QMediaPlayer
+    from PySide6.QtTest import QTest
+    from dylive.library import scan_library
+    from dylive.replay import save_metadata
+    from dylive.ui.replay import ReplayDialog
+    ffmpeg, _, source, _ = media
+    prefix = tmp_path / "20261020_200000_回放"
+    first, second = prefix.with_suffix(".mp4"), tmp_path / (prefix.name + "_r1.mp4")
+    for path in (first, second):
+        shutil.copyfile(source, path)
+    prefix.with_suffix(".jsonl").write_text('\n'.join(json.dumps({
+        "offset": offset, "user_name": "测试", "content": content, "kind": "chat"})
+        for offset, content in [(2.5, "第一段"), (10.5, "第二段")]), encoding="utf-8")
+    save_metadata(prefix, "123", [{"file": first.name, "start": 2, "duration": 4},
+                                  {"file": second.name, "start": 10, "duration": 4}], {})
+    dialog = ReplayDialog(scan_library(tmp_path)[0], ffmpeg=str(ffmpeg))
+    frames = []
+    dialog.video.videoSink().videoFrameChanged.connect(lambda frame: frames.append(frame.isValid()))
+    dialog.show()
+    dialog.audio.setMuted(True)
+
+    def wait(predicate):
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            qapp.processEvents()
+            if predicate():
+                return
+            QTest.qWait(20)
+        assert predicate(), dialog.status.text()
+
+    try:
+        wait(lambda: dialog.segment_index == 0 and dialog.player.isSeekable())
+        dialog.seek_event(3.5)
+        wait(lambda: dialog.player.position() >= 1500 and any(frames))
+        dialog.player.pause()
+        assert "第一段" in dialog.chat.text() and "第二段" not in dialog.chat.text()
+        dialog.seek_event(10.5)
+        wait(lambda: dialog.segment_index == 1 and dialog.player.isSeekable()
+             and dialog.player.position() >= 500 and "第二段" in dialog.chat.text())
+        dialog.player.pause()
+        dialog.seek_event(6.5)  # 空档不跳到错误画面，也不改变当前分片。
+        assert dialog.segment_index == 1 and "没有对应画面" in dialog.status.text()
+        dialog._choose_segment(0, 3.7)
+        wait(lambda: dialog.segment_index == 1)  # 当前片段结束后自动接下一片段。
+        assert dialog.player.error() == QMediaPlayer.NoError
+    finally:
+        dialog.reject()
+    assert dialog.player.source().isEmpty()
 
 
 @pytest.mark.parametrize("mode", [subtitle.CHAT, subtitle.SCROLL])
