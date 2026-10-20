@@ -206,8 +206,20 @@ def test_real_queue_partial_failure_and_restart_retry(media, tmp_path):
             assert any(stream["codec_type"] == "subtitle" for stream in info["streams"])
         text = run(ffmpeg, "-v", "error", "-i", second.with_suffix(".mkv"),
                    "-map", "0:s:0", "-c:s", "ass", "-f", "ass", "-").decode("utf-8")
-        assert "0:00:00.50" in text
-        assert "0:00:04.50" not in text
+        # FFmpeg 版本不同，AAC 预滚可能让封装后的所有轨道整体平移约 23ms。
+        # 校验相对视频首帧的时间；ASS 只精确到百分之一秒，不能比较固定字符串。
+        timing = json.loads(run(ffprobe, "-v", "error", "-select_streams", "v:0",
+                                "-show_entries", "stream=start_time", "-of", "json",
+                                second.with_suffix(".mkv")))
+        video_start = float(timing["streams"][0]["start_time"])
+        starts = []
+        for line in text.splitlines():
+            if line.startswith("Dialogue:"):
+                h, m, s = map(float, line.split(",")[1].split(":"))
+                starts.append(h * 3600 + m * 60 + s - video_start)
+        assert starts
+        assert min(starts) == pytest.approx(0, abs=0.02)  # 继承上一片的消息。
+        assert max(starts) == pytest.approx(0.5, abs=0.02)  # 4.5 秒减去片段起点 4 秒。
         assert not second.exists()
     finally:
         restored.shutdown()
