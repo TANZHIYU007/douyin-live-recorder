@@ -4,6 +4,7 @@ import io
 import sys
 import threading
 import time
+import traceback
 import zipfile
 
 from dylive import runtime
@@ -82,7 +83,7 @@ def test_两个进程式调用不会互相删除文件(tmp_path, monkeypatch):
     first.join(5)
     second.join(5)
 
-    assert not errors
+    assert not errors, "\n".join("".join(traceback.format_exception(error)) for error in errors)
     assert not first.is_alive() and not second.is_alive()
     assert runtime.is_ready()
     assert not list(app_dir.glob(".runtime-preparing-*"))

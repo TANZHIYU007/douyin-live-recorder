@@ -162,3 +162,20 @@ def test_incomplete_payload_is_rejected(tmp_path):
     build_exe.append_payload(exe, payload)
     with pytest.raises(SystemExit, match="载荷内容不完整"):
         build_exe.verify(exe)
+
+
+def test_pyinstaller_honors_output_directory(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    target = tmp_path / "v1.3.0"
+    target.mkdir()
+    monkeypatch.setattr(build_exe, "DIST", target)
+    monkeypatch.setattr(build_exe, "verify_pyinstaller_archive", lambda _exe: None)
+
+    def run(command, **_kwargs):
+        assert command[command.index("--distpath") + 1] == str(target)
+        (target / "Lumina-Lite.exe").write_bytes(b"test")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(build_exe.subprocess, "run", run)
+    assert build_exe.run_pyinstaller(tmp_path / "icon.ico", tmp_path / "version.txt",
+                                    "Lumina-Lite") == target / "Lumina-Lite.exe"

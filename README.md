@@ -4,7 +4,7 @@
 
 **抖音直播录制 —— 画面无损、弹幕结构化，还能把弹幕封成字幕轨**
 
-多房间同时监测 · 开播自动开录 · 断网自动重连 · 图形界面开箱即用
+多房间自动录制 · 本地录像库 · 弹幕搜索与同步回放 · 主播独立方案
 
 ![平台](https://img.shields.io/badge/平台-Windows%20%7C%20macOS-blue)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab)
@@ -26,6 +26,20 @@ WebSocket 抓下来解成结构化事件。两边共用同一个起录时刻做�
 
 支持**多房间同时监测**：列表里的房间各录各的，开播自动开始、下播继续守候；
 所有房间共用一个后台浏览器，五个房间也就一份浏览器的内存开销。
+
+## v1.3.0 更新重点
+
+这一版补齐「录下来 → 整理 → 搜索回看 → 录后处理」的使用流程：
+
+- **本地录像库**：按场次归档视频、弹幕和分片，统一查看全局目录与主播独立目录。
+- **弹幕搜索与同步回放**：跨场搜索内容或用户名，双击定位画面，支持分片连续播放。
+- **主播独立录制方案**：每位主播单独保存画质、输出目录、格式、分片和字幕设置。
+- **录后处理队列**：持久化排队、失败重试、重启恢复，已处理分片不会重复封装。
+- **兼容与保护**：保存回放时间轴，保留字幕处理错误，修复含句点标题的文件命名问题。
+
+完整变化与兼容说明见 [1.3.0 发布说明](docs/releases/1.3.0.md)。
+正式下载以 [GitHub Releases](https://github.com/TANZHIYU007/douyin-live-recorder/releases) 页面为准；
+开发分支或 PR 中的版本说明不代表该版本已经发布。
 
 ## 能做什么
 
@@ -53,16 +67,31 @@ WebSocket 抓下来解成结构化事件。两边共用同一个起录时刻做�
 
 ### Windows：直接用 exe
 
-到 [Releases](../../releases) 选择一个版本：
+到 [Releases](https://github.com/TANZHIYU007/douyin-live-recorder/releases) 下载，两个版本功能相同：
 
-- `Lumina-Full.exe`（推荐，具体大小以 Release 附件为准）：自带 Chromium、FFmpeg 和 FFprobe，
-  双击就能用，不需要安装其他软件。
-- `Lumina-Lite.exe`：复用电脑里的 Edge（找不到时再尝试 Chrome）以及
-  PATH 中的 FFmpeg/FFprobe，适合已经配置好环境的用户。
+| 版本 | 自带内容 | 适合谁 |
+| --- | --- | --- |
+| `Lumina-Full.exe` | 程序、回放组件、Chromium、FFmpeg、FFprobe | 推荐给希望下载后直接使用的用户 |
+| `Lumina-Lite.exe` | 程序与回放组件；录制使用系统 Edge/Chrome 和 FFmpeg/FFprobe | 已配置好录制环境、希望下载更小的用户 |
+
+包体积会随依赖版本变化，以附件实际大小为准。Lite 内置回放组件并不代替录制和
+字幕封装所需的 FFmpeg/FFprobe；未配置这些工具时请选择 Full。
+发布页同时提供 `SHA256SUMS.txt`，可用 PowerShell 的 `Get-FileHash` 核对下载文件。
 
 Full 版首次启动会弹一个进度框，把内置的 Chromium、FFmpeg、FFprobe 和共享库解压到
-`%LOCALAPPDATA%\Lumina\runtime`（约 662MB，一次性）。之后每次启动直接复用。
-想彻底清干净就删掉 `%LOCALAPPDATA%\Lumina` 整个目录。
+`%LOCALAPPDATA%\Lumina\runtime`。同一构建只解压一次，之后启动直接复用。
+升级后会自动更新内置运行环境，不需要手动删除应用数据目录。
+
+### 从 v1.2.1 升级
+
+1. 停止录制并正常退出旧版，下载新的 Full 或 Lite 替换旧程序。
+2. 保留原录制目录；建议升级前备份 `%LOCALAPPDATA%\Lumina` 中的配置与处理队列。
+   不要把它当成程序安装目录整体删除，这里还保存登录状态和日志。
+3. 打开「录像库」扫描旧录像。已有视频与 JSONL 无需转换；新功能不会搬动这些文件。
+
+旧录像没有 `.session.json` 时，回放会优先读取处理队列中的时间记录，否则按视频
+时长推算并提示可能的同步偏差。新录像的时间记录请与视频、JSONL 一起保留。
+主播独立方案默认关闭，启用前仍跟随原有全局设置；保存后停止并重新开始该房间生效。
 
 主界面「设置 → 运行环境 → 立即检查」会逐项检查浏览器、FFmpeg、FFprobe 和网络，
 Lite 版缺依赖时也会在这里明确显示具体原因。
@@ -82,6 +111,8 @@ traceback 在同目录的 `crash.log` 里。
 
 发布包或无人值守环境可以用 `Lumina-Full.exe --selftest-headless` 跑相同检查，不弹窗口，
 结果仍写入 `selftest.txt`，并用退出码表示是否全部通过。
+加上 `--offline` 只检查本地运行环境、媒体工具和浏览器，不连接抖音。
+发布构建使用离线检查，避免平台临时不可达导致有效安装包构建失败；真实直播连接仍需单独验证。
 
 ### 从源码运行（Windows / macOS / Linux）
 
@@ -156,7 +187,7 @@ python main.py 123456789 --embed --danmaku-delay 5   # 顺带补偿 5 秒拉流�
 - **运行日志同时落盘**，写在 `%LOCALAPPDATA%\Lumina\logs\`（滚动，2MB × 5）。
   界面里那块只留最近几千行，关掉窗口就没了，排查问题要翻的是文件里那份。
   排查弹幕收不到时在设置里打开「详细日志」，DEBUG 会一起写进文件（界面上不刷）。
-- 右上角的月亮/太阳图标切换浅色和深色主题。
+- 浅色和深色主题在「设置 → 界面 → 主题」切换。
 
 ## 断流和断网会怎样
 
@@ -260,6 +291,7 @@ CDN 的缓冲，通常慢 3~8 秒**。两边用同一个起录时刻对齐之后
 | `.mp4` | 画面。默认分片写入，中途断电已写下的部分照样能播 |
 | `.jsonl` | 弹幕全量记录，一行一个事件，字段最全，其他格式都从它转 |
 | `.xml` | B 站格式弹幕，播放器可直接外挂 |
+| `.session.json` | 分片时间轴、房间号和当时的录制参数，用于同步回放与补做字幕 |
 
 `.jsonl` 里每条长这样（`offset` 是相对起录时刻的秒数）：
 
@@ -308,12 +340,17 @@ CPU 和带宽开销都很低。它顺带还能拿到页面自己请求的 `enter
 
 ### Windows
 
+先安装打包依赖与当前 Playwright 对应的浏览器，并准备 FFmpeg/FFprobe：
+
 ```bash
+pip install ".[browser,native,gui,dev]" pyinstaller
+python -m playwright install chromium
 python build_exe.py
 ```
 
-默认会同时生成 `dist/Lumina-Full.exe`（约 379MB）和
-`dist/Lumina-Lite.exe`（约 86MB）。只需要 Lite 时可运行：
+默认会同时生成 `dist/Lumina-Full.exe` 和 `dist/Lumina-Lite.exe`。
+两者都验证 Qt 界面启动；可找到 FFmpeg 时还会生成测试片验证成品回放与弹幕定位。
+Full 额外检查内置浏览器、FFmpeg 和 FFprobe。只需要 Lite 时可运行：
 
 ```bash
 python build_exe.py --lite
@@ -321,7 +358,7 @@ python build_exe.py --lite
 
 Full 版分两步，第二步是重点：
 
-1. PyInstaller 打出只含 Python + Qt + Playwright 驱动的单文件 exe（约 85MB）；
+1. PyInstaller 打出含 Python、Qt（含回放组件）和 Playwright 驱动的单文件 exe；
 2. 把 Chromium、FFmpeg、FFprobe 和共享 DLL 压成 zip **追加到 exe 尾部**。
 
 发布构建建议使用 Gyan full shared 版，并把它的 `bin` 目录放进
@@ -340,6 +377,13 @@ Full 版分两步，第二步是重点：
 
 Full 版只带完整版 Chromium 一份（不带 headless shell），所以固定使用内置
 `channel="chromium"`；Lite 版则自动优先选择系统 `msedge`，其次是 `chrome`。
+
+### 正式发布流程
+
+发布准备通过 PR 合入 `main`；确认版本号、测试和两版成品后，再从对应提交推送
+与项目版本一致的标签（本版为 `v1.3.0`）。标签会触发 Release 工作流，依次进行
+版本校验、回归测试、Full/Lite 构建、成品检查与 SHA-256 生成，再上传两个程序和
+校验文件，并使用 `docs/releases/<版本号>.md` 作为发布说明。只合并 PR 不会自动发布。
 
 ### macOS
 
@@ -392,6 +436,10 @@ dylive/
   writers.py          JSONL / XML / 终端输出
   recorder.py         单房间调度
   manager.py          多房间调度
+  library.py          本地录像按场次归档
+  processing.py       持久化录后处理队列
+  replay.py           弹幕搜索、分片时间轴和回放定位
+  profiles.py         主播独立录制参数的白名单与校验
   runtime.py          打包版的内置运行时（尾部载荷解压）
   selftest.py         环境自检（环境齐不齐）
   diagnose.py         链路诊断（对着真实直播间，断在哪一环）
@@ -399,6 +447,8 @@ dylive/
   ui/widgets.py       卡片、指标块、房间行、预览、弹幕表格模型
   ui/preview_feed.py  预览的解码线程与按帧推送
   ui/settings.py      设置对话框与配置落盘
+  ui/library.py       录像库、处理队列和跨场弹幕搜索界面
+  ui/replay.py        视频播放器与同步弹幕列表
   ui/first_run.py     首次运行的解压进度窗
   ui/window.py        主窗口（布局间距等常量都集中在文件头部）
 tools/convert.py      jsonl -> ass / xml / txt
@@ -421,7 +471,8 @@ python -m pytest tests/test_media_integration.py
 ```
 
 它会生成短测试片，通过本机 HTTP 验证四种容器及分段录制，再检查两种字幕样式、
-保留／替换原片和成品音视频解码；不连接真实直播间，不使用用户的录像或配置。
+保留／替换原片、成品音视频解码和内置播放器的弹幕跳转、跨片连续播放；
+不连接真实直播间，不使用用户的录像或配置。
 实际直播仍受平台接口、网络和风控影响，需要单独实测。
 
 录制参数以 `Options` 为准：命令行与界面通过 `Options.from_mapping` 共用字段，
