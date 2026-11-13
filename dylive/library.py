@@ -15,10 +15,13 @@ from typing import Iterable, Optional
 
 from .subtitle import VIDEO_SUFFIXES
 
-SIDE_SUFFIXES = {".jsonl", ".xml", ".ass"}
+SIDE_SUFFIXES = {".jsonl", ".xml", ".ass", ".srt"}
 KNOWN_SUFFIXES = set(VIDEO_SUFFIXES) | SIDE_SUFFIXES
 _PART_SUFFIX = re.compile(r"(?:_r\d+)?_part\d+$|_r\d+$")
 _STAMP = re.compile(r"^(\d{8})_(\d{6})_(.*)$", re.S)
+_SPEECH_SUFFIX = re.compile(r"_语音字幕(?:_\d+)?$")
+_SPEECH_CHAT_SUFFIX = re.compile(r"_语音字幕(?:_\d+)?_弹幕$")
+_TRANSCRIPT_SUFFIX = re.compile(r"_语音识别-[A-Za-z0-9-]+$")
 
 
 @dataclass(frozen=True)
@@ -42,13 +45,30 @@ class RecordingSession:
         return self.prefix.parent
 
 
+def original_part_stem(path: Path) -> str:
+    """去掉字幕派生标记，保留原有重连和分片编号。"""
+    stem = path.stem
+    while True:
+        original = stem
+        if _SPEECH_CHAT_SUFFIX.search(stem):
+            stem = stem[:-3]
+        stem = _TRANSCRIPT_SUFFIX.sub("", stem)
+        stem = _SPEECH_SUFFIX.sub("", stem)
+        if stem.endswith("_弹幕版"):
+            stem = stem[:-4]
+        if stem == original:
+            return stem
+
+
+def is_speech_video(path: Path) -> bool:
+    return bool(_SPEECH_SUFFIX.search(path.stem))
+
+
 def recording_prefix(path: Path) -> Path:
     """从某个产出文件还原整场录制共用的前缀。"""
     if path.name.endswith(".session.json"):
         return path.with_name(path.name[:-len(".session.json")])
-    stem = path.stem
-    if stem.endswith("_弹幕版"):
-        stem = stem[:-4]
+    stem = original_part_stem(path)
     stem = _PART_SUFFIX.sub("", stem)
     return path.parent / stem
 
@@ -86,7 +106,8 @@ def scan_library(root: Path) -> list[RecordingSession]:
         candidates = root.rglob("*")
         for path in candidates:
             try:
-                if (not path.is_file() or (path.suffix.lower() not in KNOWN_SUFFIXES
+                if (any(part.startswith(".") for part in path.relative_to(root).parts)
+                        or not path.is_file() or (path.suffix.lower() not in KNOWN_SUFFIXES
                                           and not path.name.endswith(".session.json"))):
                     continue
             except OSError:

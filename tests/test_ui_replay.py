@@ -1,4 +1,5 @@
 import json
+import gc
 import threading
 import time
 from pathlib import Path
@@ -135,3 +136,27 @@ def test_close_while_loading_ignores_late_result(qapp, tmp_path, monkeypatch):
     release.set()
     QTest.qWait(30)
     assert dialog.model.rowCount() == 0
+
+
+def test_repeated_close_during_loading_survives_collection(qapp, tmp_path, monkeypatch):
+    from dylive.ui import replay
+    release = threading.Event()
+    finished = []
+
+    def load(*_args, **_kwargs):
+        assert release.wait(3)
+        finished.append(True)
+        return [], type("Stats", (), {"skipped": 0, "truncated": False})()
+
+    monkeypatch.setattr(replay, "load_events", load)
+    session = make_session(tmp_path)
+    for _ in range(12):
+        dialog = ReplayDialog(session)
+        dialog.reject()
+        del dialog
+        gc.collect()
+        qapp.processEvents()
+    release.set()
+    wait_for(qapp, lambda: len(finished) == 12)
+    gc.collect()
+    qapp.processEvents()

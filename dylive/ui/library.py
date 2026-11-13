@@ -16,10 +16,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QFrame, QHeaderView,
 
 from .. import paths, subtitle
 from ..library import RecordingSession, recording_prefix, scan_library
-from ..processing import (COMPLETED, FAILED, PENDING, RUNNING, PostProcessQueue,
-                          ProcessingTask)
+from ..processing import (ACTIVE, CANCELLED, COMPLETED, FAILED, PENDING, RUNNING,
+                          PostProcessQueue, ProcessingTask)
 from ..profiles import clean_recording
-from ..replay import read_metadata, saved_offsets, search_sessions
+from ..replay import current_videos, read_metadata, saved_offsets, search_sessions
 from ..utils import clock
 from ..utils import human_size
 
@@ -127,10 +127,13 @@ class RecordingLibraryDialog(QDialog):
         self.open_session_btn = QPushButton("打开所在目录")
         self.queue_btn = QPushButton("加入字幕处理队列")
         self.queue_btn.setObjectName("primary")
+        self.transcribe_btn = QPushButton("语音转文字…")
+        self.transcribe_btn.setToolTip("只处理选中的这场录像；保留原片，生成带语音字幕的新视频。")
         actions.addWidget(self.play_btn)
         actions.addWidget(self.replay_btn)
         actions.addWidget(self.open_session_btn)
         actions.addStretch(1)
+        actions.addWidget(self.transcribe_btn)
         actions.addWidget(self.queue_btn)
         lay.addLayout(actions)
         return page
@@ -248,9 +251,12 @@ class RecordingLibraryDialog(QDialog):
         lay.addWidget(self.queue_table, 1)
 
         actions = QHBoxLayout()
-        self.retry_btn = QPushButton("重试失败任务")
+        self.retry_btn = QPushButton("重试失败或取消的任务")
+        self.cancel_task_btn = QPushButton("取消语音任务")
+        self.cancel_task_btn.setEnabled(False)
         self.clear_btn = QPushButton("清除已完成记录")
         actions.addWidget(self.retry_btn)
+        actions.addWidget(self.cancel_task_btn)
         actions.addWidget(self.clear_btn)
         actions.addStretch(1)
         lay.addLayout(actions)
@@ -276,7 +282,10 @@ class RecordingLibraryDialog(QDialog):
         self.replay_btn.clicked.connect(self._replay)
         self.open_session_btn.clicked.connect(self._open_session)
         self.queue_btn.clicked.connect(self._enqueue)
+        self.transcribe_btn.clicked.connect(self._transcribe)
         self.retry_btn.clicked.connect(self._retry)
+        self.cancel_task_btn.clicked.connect(self._cancel_task)
+        self.queue_table.itemSelectionChanged.connect(self._sync_task_buttons)
         self.clear_btn.clicked.connect(self._clear_finished)
 
     def refresh(self) -> None:
@@ -354,6 +363,7 @@ class RecordingLibraryDialog(QDialog):
                 RUNNING: "处理中",
                 COMPLETED: "处理完成",
                 FAILED: "处理失败",
+                CANCELLED: "已取消",
             }.get(task.status, task.status)
         if not session.videos:
             return "没有视频"
@@ -371,7 +381,31 @@ class RecordingLibraryDialog(QDialog):
         self.play_btn.setEnabled(bool(session and session.videos))
         self.replay_btn.setEnabled(bool(session and (session.videos or session.jsonl)))
         self.open_session_btn.setEnabled(session is not None)
-        self.queue_btn.setEnabled(bool(session and session.jsonl and session.videos))
+        busy = bool(session and (self._active_task(session) or self._recording_in_progress(session)))
+        self.queue_btn.setEnabled(bool(session and session.jsonl and session.videos and not busy))
+        self.transcribe_btn.setEnabled(bool(session and session.videos and not busy))
+        self.transcribe_btn.setToolTip(
+            "这场录像仍在录制或已有处理任务，请完成后再转写。" if busy else
+            "只处理选中的这场录像；保留原片，生成带语音字幕的新视频。")
+
+    def _active_task(self, session: RecordingSession) -> bool:
+        return any(Path(task.session_prefix).resolve() == session.prefix.resolve()
+                   and task.status in ACTIVE for task in self.queue.snapshot())
+
+    def _recording_in_progress(self, session: RecordingSession) -> bool:
+        parent = self.parent()
+        while parent is not None:
+            manager = getattr(parent, "manager", None)
+            if manager is not None:
+                for entry in manager.rooms():
+                    recorder = getattr(entry, "_recorder", None)
+                    prefix = getattr(recorder, "_prefix", None)
+                    if (prefix is not None and recorder.status().running
+                            and Path(prefix).resolve() == session.prefix.resolve()):
+                        return True
+                return False
+            parent = parent.parent()
+        return False
 
     def _open_root(self) -> None:
         root = Path(self.settings.out_dir)
@@ -388,7 +422,7 @@ class RecordingLibraryDialog(QDialog):
         if not session or not session.videos:
             return
         # 文件可能刚被后台替换，下一轮扫描尚未送达；播放前按当前目录重新找。
-        videos = subtitle.find_videos(session.prefix) + list(session.videos)
+        videos = current_videos(session)
         current = next((path for path in videos
                         if recording_prefix(path) == session.prefix and path.is_file()), None)
         if current is None:
@@ -401,8 +435,7 @@ class RecordingLibraryDialog(QDialog):
         session = self._selected_session()
         if not session or session.jsonl is None:
             return
-        videos = [p for p in subtitle.find_videos(session.prefix)
-                  if recording_prefix(p) == session.prefix]
+        videos = current_videos(session, prefer_speech=False)
         metadata = read_metadata(session.prefix)
         settings = replace(self.settings, **clean_recording(metadata.get("recording")))
         try:
@@ -417,6 +450,43 @@ class RecordingLibraryDialog(QDialog):
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "拾光", str(exc))
             return
+        self.tabs.setCurrentIndex(1)
+        self._refresh_queue(select_id=task.id)
+
+    def _transcribe(self) -> None:
+        session = self._selected_session()
+        if session is None:
+            return
+        if self._active_task(session) or self._recording_in_progress(session):
+            QMessageBox.information(self, "拾光", "这场录像仍在录制或已有处理任务，请完成后再转写。")
+            return
+        from .transcription import TranscriptionDialog
+        dialog = TranscriptionDialog(self.settings, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        # 对话框可以长时间下载模型，提交时重新检查录制和文件状态。
+        if self._active_task(session) or self._recording_in_progress(session):
+            QMessageBox.information(self, "拾光", "这场录像已有录制或处理任务，请稍后再试。")
+            return
+        videos = current_videos(session, prefer_speech=False)
+        metadata = read_metadata(session.prefix)
+        settings = replace(self.settings, **clean_recording(metadata.get("recording")))
+        options = dialog.selected_options()
+        try:
+            task = self.queue.enqueue_transcription(
+                session.prefix, videos,
+                saved_offsets(session.prefix, videos, self.queue.latest_for(session.prefix)),
+                jsonl=session.jsonl,
+                style=subtitle.Style.from_options(settings),
+                **options,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, "拾光", str(exc))
+            return
+        for name, key in (("speech_model", "model"), ("speech_language", "language"),
+                          ("speech_subtitle_mode", "subtitle_mode")):
+            setattr(self.settings, name, options[key])
+        self.settings.save()
         self.tabs.setCurrentIndex(1)
         self._refresh_queue(select_id=task.id)
 
@@ -450,18 +520,21 @@ class RecordingLibraryDialog(QDialog):
             session = self.sessions.get(item.data(Qt.UserRole)) if item else None
             if session:
                 self.library_table.item(row, 5).setText(self._session_status(session))
+        self._sync_buttons()
+        self._sync_task_buttons()
 
     @staticmethod
     def _finished_versions(tasks: list[ProcessingTask]) -> dict[str, tuple]:
         return {task.id: (task.status, task.attempts, task.updated_at)
-                for task in tasks if task.status in {COMPLETED, FAILED}}
+                for task in tasks if task.status in {COMPLETED, FAILED, CANCELLED}}
 
     @staticmethod
     def _task_values(task: ProcessingTask) -> list[str]:
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(task.created_at))
-        name = Path(task.session_prefix).name
+        kind = "语音转文字" if task.task_type == "transcription" else "弹幕字幕"
+        name = "[%s] %s" % (kind, Path(task.session_prefix).name)
         state = {PENDING: "等待", RUNNING: "处理中", COMPLETED: "完成",
-                 FAILED: "失败"}.get(task.status, task.status)
+                 FAILED: "失败", CANCELLED: "已取消"}.get(task.status, task.status)
         progress = task.error if task.status == FAILED else task.message
         return [when, name, state, progress, str(task.attempts)]
 
@@ -473,9 +546,20 @@ class RecordingLibraryDialog(QDialog):
     def _retry(self) -> None:
         task_id = self._selected_task_id()
         if not task_id or not self.queue.retry(task_id):
-            QMessageBox.information(self, "拾光", "请选择一个处理失败的任务。")
+            QMessageBox.information(self, "拾光", "请选择一个处理失败或已取消的任务。")
             return
         self._refresh_queue(select_id=task_id)
+
+    def _sync_task_buttons(self) -> None:
+        task_id = self._selected_task_id()
+        task = next((item for item in self.queue.snapshot() if item.id == task_id), None)
+        self.cancel_task_btn.setEnabled(bool(task and task.task_type == "transcription"
+                                             and task.status in ACTIVE))
+
+    def _cancel_task(self) -> None:
+        task_id = self._selected_task_id()
+        if task_id and self.queue.cancel(task_id):
+            self._refresh_queue(select_id=task_id)
 
     def _clear_finished(self) -> None:
         removed = self.queue.clear_finished()

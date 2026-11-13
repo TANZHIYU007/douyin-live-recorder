@@ -9,3 +9,9 @@ websocket-client>=1.7.0
 
 # 图形界面（python gui.py）
 PySide6>=6.6.0
+
+# 本地语音转文字运行库；模型由用户在设置中按需下载
+faster-whisper>=1.1,<2
+# 与 faster-whisper 的 metadata_errors 音频解码参数兼容
+av>=11,<17
+kaldi-native-fbank>=1.20,<2

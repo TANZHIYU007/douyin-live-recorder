@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Iterator
 
 from . import subtitle, video
-from .library import RecordingSession, recording_prefix
+from .library import (RecordingSession, is_speech_video, original_part_stem,
+                      recording_prefix)
 from .profiles import clean_recording
 from .utils import files_with_prefix
 
@@ -157,8 +158,7 @@ def read_metadata(prefix: Path) -> dict:
 
 
 def part_key(path: Path) -> str:
-    stem = path.stem
-    return stem[:-4] if stem.endswith("_弹幕版") else stem
+    return original_part_stem(path)
 
 
 def _saved_parts(metadata: dict, task=None) -> dict[str, tuple[float, float]]:
@@ -185,12 +185,20 @@ def saved_offsets(prefix: Path, videos: list[Path], task=None) -> list[float]:
     return [known[part_key(p)][0] for p in videos] if all(part_key(p) in known for p in videos) else []
 
 
-def current_videos(session: RecordingSession) -> list[Path]:
+def current_videos(session: RecordingSession, *, prefer_speech: bool = True) -> list[Path]:
     """同时有原片和字幕副本时只回放一份，字幕替换后仍认得原分片。"""
     candidates = {p for p in files_with_prefix(session.prefix)
                   if p.suffix.lower() in subtitle.VIDEO_SUFFIXES} | set(session.videos)
     selected: dict[str, Path] = {}
-    for path in sorted(candidates, key=lambda p: (p.stem.endswith("_弹幕版"), p.name)):
+    def priority(path: Path):
+        speech = is_speech_video(path)
+        # 回放选语音成品，重新识别优先使用原片；同一分片永远只取一份。
+        rank = (0 if speech else 1) if prefer_speech else (2 if speech else 0)
+        version = re.search(r"_语音字幕_(\d+)$", path.stem) if speech else None
+        generation = int(version.group(1)) if version else 1
+        return rank, -generation if speech else 0, path.stem.endswith("_弹幕版"), path.name
+
+    for path in sorted(candidates, key=priority):
         if recording_prefix(path) == session.prefix and path.is_file():
             selected.setdefault(part_key(path), path)
     return sorted(selected.values(), key=lambda p: [int(v) if v.isdigit() else v

@@ -36,7 +36,7 @@ BUNDLE_ID = "com.lumina.shiguang"
 
 sys.path.insert(0, str(ROOT))
 from build_exe import (OTHER_EXCLUDES, QT_EXCLUDES, find_chromium,  # noqa: E402
-                       human, log)
+                       human, log, speech_pyinstaller_args)
 
 
 def require_macos() -> None:
@@ -141,6 +141,7 @@ def run_pyinstaller(icns: Path, runtime: Path) -> Path:
            "--collect-data", "playwright",
            "--collect-binaries", "playwright",
            "--hidden-import", "dylive.ui.window"]
+    cmd += speech_pyinstaller_args()
     for mod in QT_EXCLUDES + OTHER_EXCLUDES:
         cmd += ["--exclude-module", mod]
     cmd.append(str(ROOT / "gui.py"))
@@ -215,6 +216,15 @@ def verify(app: Path) -> None:
             problems.append("runtime/ms-playwright 下没有 chromium")
     if problems:
         raise SystemExit("产物有问题：\n  " + "\n  ".join(problems))
+
+    # 与 Windows 两版相同，验证延迟导入的语音原生库；不会下载识别模型。
+    try:
+        speech = subprocess.run([str(exe), "--selftest-speech-runtime"],
+                                capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit("语音运行库离线自检超时") from exc
+    if speech.returncode:
+        raise SystemExit("语音运行库离线自检失败：" + speech.stderr[-2000:])
 
     size = sum(p.stat().st_size for p in app.rglob("*") if p.is_file())
     log("校验通过，%s 共 %s" % (app.name, human(size)))

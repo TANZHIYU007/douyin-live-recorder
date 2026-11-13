@@ -6,7 +6,7 @@ import bisect
 import threading
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QDoubleSpinBox, QHeaderView, QHBoxLayout, QLabel,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QVBoxLayout, QWidget)
 
 from ..replay import MAX_EVENTS, Timeline, build_timeline, load_events
+from ..speech_subtitle import COMBINED_TITLE, DANMAKU_TITLE, SPEECH_TITLE
 from ..utils import clock
 from .theme import KIND_LABELS
 
@@ -77,8 +78,10 @@ class ReplayDialog(QDialog):
         self._closed = False
         self._cancel = threading.Event()
         self._last_chat = None
+        self._events_loaded = False
+        self._session_has_jsonl = session.jsonl is not None
         self._event_offsets = []
-        self._loader = _Loader()
+        self._loader = _Loader(self)
         self._loader.loaded.connect(self._loaded)
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
@@ -89,6 +92,7 @@ class ReplayDialog(QDialog):
         self.player.durationChanged.connect(
             lambda value: self.slider.setRange(0, min(2_147_483_647, max(0, value))))
         self.player.mediaStatusChanged.connect(self._media_status)
+        self.player.tracksChanged.connect(self._select_speech_subtitle)
         self.player.seekableChanged.connect(lambda _value: self._apply_pending_seek())
         self.player.playbackStateChanged.connect(lambda state: self.play_btn.setText(
             "暂停" if state == QMediaPlayer.PlayingState else "播放"))
@@ -110,10 +114,16 @@ class ReplayDialog(QDialog):
                                  if seek_offset is not None else
                                  "仅载入前 %d 条事件；其余记录可在录像库跨场搜索" % MAX_EVENTS)
                 if not cancel.is_set():
-                    reporter.loaded.emit(events, timeline, "；".join(notes))
+                    try:
+                        reporter.loaded.emit(events, timeline, "；".join(notes))
+                    except RuntimeError:
+                        pass  # 回放窗口已销毁。
             except Exception as exc:  # noqa: BLE001 - 文件异常需要显示给用户
                 if not cancel.is_set():
-                    reporter.loaded.emit([], Timeline(), "读取回放失败：" + str(exc))
+                    try:
+                        reporter.loaded.emit([], Timeline(), "读取回放失败：" + str(exc))
+                    except RuntimeError:
+                        pass
 
         threading.Thread(target=load, name="replay-load", daemon=True).start()
 
@@ -126,6 +136,7 @@ class ReplayDialog(QDialog):
         outer.addWidget(self.status)
         split = QSplitter(Qt.Horizontal)
         left, right = QWidget(), QWidget()
+        self.events_panel = right
         video_layout, chat_layout = QVBoxLayout(left), QVBoxLayout(right)
         video_layout.setContentsMargins(0, 0, 8, 0)
         chat_layout.setContentsMargins(8, 0, 0, 0)
@@ -157,6 +168,15 @@ class ReplayDialog(QDialog):
         self.mute = QCheckBox("静音")
         self.mute.toggled.connect(self.audio.setMuted)
         controls.addWidget(self.mute)
+        self.speech_subtitles = QCheckBox("语音字幕")
+        self.speech_subtitles.setChecked(True)
+        self.speech_subtitles.setEnabled(False)
+        self.speech_subtitles.toggled.connect(self._select_speech_subtitle)
+        controls.addWidget(self.speech_subtitles)
+        self.show_danmaku = QCheckBox("显示弹幕")
+        self.show_danmaku.setChecked(True)
+        self.show_danmaku.toggled.connect(self._toggle_danmaku)
+        controls.addWidget(self.show_danmaku)
         video_layout.addLayout(controls)
         compensation = QHBoxLayout()
         compensation.addWidget(QLabel("弹幕延迟补偿"))
@@ -211,6 +231,7 @@ class ReplayDialog(QDialog):
             return
         self.timeline = timeline
         self.model.set_events(events)
+        self._events_loaded = True
         self._event_offsets = [e.offset for e in events]
         self._filter()
         self.delay.setValue(timeline.delay)
@@ -226,6 +247,7 @@ class ReplayDialog(QDialog):
             self.seek_event(self._initial_seek)
         elif timeline.segments:
             self._choose_segment(0, autoplay=False)
+        self._select_speech_subtitle()
 
     def _filter(self):
         self.model.filter(self.search.text())
@@ -270,10 +292,45 @@ class ReplayDialog(QDialog):
         if self._closed:
             return
         if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
-            self.player.setActiveSubtitleTrack(-1)
+            self._select_speech_subtitle()
             self._apply_pending_seek()
         elif status == QMediaPlayer.EndOfMedia and self.segment_index + 1 < len(self.timeline.segments):
             self._choose_segment(self.segment_index + 1)
+
+    def _select_speech_subtitle(self):
+        if self._closed:
+            return
+        titles = [track.stringValue(QMediaMetaData.Title) for track in self.player.subtitleTracks()]
+        speech = next((index for index, title in enumerate(titles) if title == SPEECH_TITLE), -1)
+        chat = next((index for index, title in enumerate(titles)
+                     if title in {DANMAKU_TITLE, "弹幕", "原弹幕"}), -1)
+        combined = next((index for index, title in enumerate(titles)
+                         if title == COMBINED_TITLE), -1)
+        # 仅控制可用性，不重置勾选状态；换片、缓冲及轨道更新不能重新打开用户关闭的字幕。
+        self.speech_subtitles.setEnabled(speech >= 0)
+        want_speech = self.speech_subtitles.isChecked() and speech >= 0
+        want_chat = self.show_danmaku.isChecked()
+        native_chat = bool(self.model.events) or (
+            not self._events_loaded and self._session_has_jsonl)
+        if native_chat:
+            # 有 JSONL 时由独立界面显示弹幕，不能再启用内嵌弹幕/兼容轨重复显示。
+            index = speech if want_speech else -1
+        elif want_speech and want_chat and combined >= 0:
+            index = combined
+        elif want_speech:
+            index = speech
+        else:
+            index = chat if want_chat else -1
+        self.show_danmaku.setToolTip(
+            "此文件只有独立字幕轨；同时显示需使用支持双字幕的外部播放器。"
+            if not native_chat and speech >= 0 and chat >= 0 and combined < 0 else
+            "分别控制最近弹幕、弹幕列表或视频内的弹幕字幕；不会删除弹幕记录。")
+        self.player.setActiveSubtitleTrack(index)
+
+    def _toggle_danmaku(self, visible: bool) -> None:
+        self.chat.setVisible(visible)
+        self.events_panel.setVisible(visible)
+        self._select_speech_subtitle()
 
     def _toggle_play(self):
         if self.player.playbackState() == QMediaPlayer.PlayingState:

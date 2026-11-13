@@ -4,7 +4,7 @@
     python build_exe.py
 
 分两步：
-  1. PyInstaller 打出只含 Python + Qt + playwright 驱动的单文件 exe（约 100 MB）；
+  1. PyInstaller 打出含 Python、Qt、Playwright 驱动和语音识别运行库的单文件 exe；
   2. 把 Chromium、ffmpeg 和 ffprobe 压成 zip，**追加到 exe 尾部**。
 
 第二步是关键。如果把浏览器交给 PyInstaller 打包，单文件模式每次启动都要把
@@ -58,8 +58,28 @@ QT_EXCLUDES = [
     "PySide6.QtPdf", "PySide6.QtPdfWidgets", "PySide6.QtTextToSpeech",
     "PySide6.QtWebChannel", "PySide6.QtWebSockets", "PySide6.QtWebView",
 ]
-OTHER_EXCLUDES = ["tkinter", "unittest", "pydoc_data", "test", "PIL", "numpy",
+OTHER_EXCLUDES = ["tkinter", "unittest", "pydoc_data", "test", "PIL",
                   "matplotlib", "pandas", "IPython", "setuptools", "pip"]
+
+
+def speech_pyinstaller_args() -> list[str]:
+    """保留延迟导入的语音引擎、VAD 数据和原生库，不收集下载的模型。"""
+    return [
+        "--hidden-import", "faster_whisper",
+        "--collect-data", "faster_whisper",
+        "--hidden-import", "ctranslate2",
+        "--collect-binaries", "ctranslate2",
+        "--hidden-import", "av",
+        "--hidden-import", "onnxruntime",
+        "--collect-binaries", "onnxruntime",
+        "--hidden-import", "tokenizers",
+        "--hidden-import", "huggingface_hub",
+        "--hidden-import", "numpy",
+        "--hidden-import", "kaldi_native_fbank",
+        "--collect-binaries", "kaldi_native_fbank",
+        "--hidden-import", "yaml",
+        "--copy-metadata", "faster-whisper",
+    ]
 
 
 def log(msg: str) -> None:
@@ -313,6 +333,7 @@ def run_pyinstaller(icon: Path, version_file: Path, output_name: str) -> Path:
            "--collect-data", "playwright",
            "--collect-binaries", "playwright",
            "--hidden-import", "dylive.ui.window"]
+    cmd += speech_pyinstaller_args()
     for mod in QT_EXCLUDES + OTHER_EXCLUDES:
         cmd += ["--exclude-module", mod]
     cmd.append(str(ROOT / "gui.py"))
@@ -413,7 +434,10 @@ def smoke_test(exe: Path, full: bool = True) -> None:
                 media = Path(tmp) / "replay-smoke.mp4"
                 create_smoke_media(ffmpeg, media)
                 env["LUMINA_GUI_SMOKE_MEDIA"] = str(media)
-        checks = [("Qt 界面启动", [str(exe), "--smoke-test-gui"], 180)]
+        checks = [
+            ("Qt 界面启动", [str(exe), "--smoke-test-gui"], 180),
+            ("语音运行库（离线，无识别模型）", [str(exe), "--selftest-speech-runtime"], 120),
+        ]
         if full:
             checks.append(
                 ("内置运行环境（离线）", [str(exe), "--selftest-headless", "--offline"], 240))

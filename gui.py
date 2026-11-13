@@ -93,9 +93,35 @@ def _run_selftest_headless(*, offline: bool = False) -> int:
     return 0 if ok else 1
 
 
+def _run_speech_runtime_selftest() -> int:
+    """验证成品的语音原生库和内置 VAD 数据；不下载或加载识别模型。"""
+    try:
+        from faster_whisper import WhisperModel
+        from faster_whisper.vad import get_vad_model
+        import kaldi_native_fbank  # 中文模型的本地特征提取原生库。
+
+        if not callable(WhisperModel):
+            raise RuntimeError("语音识别引擎不完整")
+        if not callable(kaldi_native_fbank.FbankOptions):
+            raise RuntimeError("中文语音识别组件不完整")
+        get_vad_model()  # 实际加载随运行库提供的本地 ONNX，验证原生库与数据路径。
+    except Exception:
+        _on_uncaught(*sys.exc_info(), show_dialog=False)
+        return 1
+    if sys.stdout:
+        print("语音运行库与本地 VAD 加载正常；未下载或加载识别模型。")
+    return 0
+
+
 def main() -> int:
     sys.excepthook = _on_uncaught
     try:
+        if "--speech-worker" in sys.argv:
+            from dylive.speech_worker import main as worker
+            index = sys.argv.index("--speech-worker")
+            return worker(*sys.argv[index + 1:])
+        if "--selftest-speech-runtime" in sys.argv:
+            return _run_speech_runtime_selftest()
         if "--selftest-headless" in sys.argv:
             return _run_selftest_headless(offline="--offline" in sys.argv)
         if "--selftest" in sys.argv:

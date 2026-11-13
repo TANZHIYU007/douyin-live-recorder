@@ -82,6 +82,9 @@ class AppSettings:
     subtitle_duration: float = 10.0      # 仅滚动样式使用
     subtitle_reserve: float = 0.4
     subtitle_delay: float = 0.0         # 弹幕整体后推的秒数，抵掉拉流延迟
+    speech_model: str = "small"         # 仅供录像库手动转写，不自动处理录制
+    speech_language: str = "auto"
+    speech_subtitle_mode: str = "combined"
     verbose_log: bool = False           # 日志文件里记到 DEBUG
     tray: bool = True                   # 显示系统托盘图标
     minimize_to_tray: bool = False      # 关窗口时收进托盘而不是退出
@@ -299,6 +302,13 @@ class SettingsDialog(QDialog):
         self.cb_embed.toggled.connect(self._sync_subtitle_enabled)
         body.addWidget(sub_card)
 
+        from .transcription import SpeechSettingsPanel
+        speech = Card("语音转文字")
+        self.speech_panel = SpeechSettingsPanel(settings)
+        speech.body.addWidget(self.speech_panel)
+        body.addWidget(speech)
+        self.finished.connect(self.speech_panel.cancel_download)
+
         adv = Card("其他")
         self.cb_preview = self._checkbox("preview", "显示实时画面预览（额外拉一路最低画质，不影响录制）")
         adv.body.addWidget(self.cb_preview)
@@ -356,7 +366,7 @@ class SettingsDialog(QDialog):
         body.addWidget(environment)
         self.recording_cards = (card, kinds_card, sub_card)
         if recording_only:
-            for widget in (adv, appearance, environment):
+            for widget in (speech, adv, appearance, environment):
                 widget.hide()
 
         self._sync_subtitle_enabled(settings.embed_subtitle)
@@ -446,6 +456,7 @@ class SettingsDialog(QDialog):
         settings.subtitle_duration = float(self.sub_speed.value())
         settings.subtitle_reserve = self.sub_reserve.value() / 100.0
         settings.subtitle_delay = self.sub_delay.value()
+        self.speech_panel.apply_to(settings)
         settings.theme = self.theme_mode.currentData()
 
 
